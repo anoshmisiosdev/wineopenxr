@@ -1,0 +1,7 @@
+[submodule "extern/OpenXR-SDK"]
+	path = extern/OpenXR-SDK
+	url = https://github.com/KhronosGroup/OpenXR-SDK.git
+[submodule "extern/wine"]
+	path = extern/wine
+	url = https://github.com/wine-mirror/wine.git
+	branch = wine-11.0

@@ -1,0 +1,256 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+
+#import <Metal/Metal.h>
+
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+
+#include "wine/debug_slim.h"
+
+#include "openxr/openxr.h"
+
+WINE_DEFAULT_DEBUG_CHANNEL(openxr);
+
+typedef int32_t NTSTATUS;
+#define STATUS_SUCCESS ((NTSTATUS)0)
+
+/* Stubs for types the shared openxr_loader.h forward-declares but this TU
+ * never dereferences. They keep header chains from pulling in D3D11 or Win32
+ * content that clashes with Metal.h */
+typedef struct { long long QuadPart; } LARGE_INTEGER;
+#define XR_USE_GRAPHICS_API_D3D11 1
+#define XR_USE_GRAPHICS_API_METAL 1
+#define XR_USE_PLATFORM_WIN32 1
+typedef int D3D_FEATURE_LEVEL;
+typedef struct { unsigned int LowPart; int HighPart; } LUID;
+typedef struct ID3D11Device ID3D11Device;
+typedef struct ID3D11DeviceContext ID3D11DeviceContext;
+typedef struct ID3D11Texture2D ID3D11Texture2D;
+typedef struct ID3D11DeviceContext4 ID3D11DeviceContext4;
+typedef struct ID3D11Fence ID3D11Fence;
+typedef struct IMTLD3D11InteropDevice IMTLD3D11InteropDevice;
+typedef struct IUnknown IUnknown;
+
+#include "openxr_loader.h"
+#include "loader_thunks.h"
+#include "openxr_thunks.h"
+
+extern struct openxr_instance_funcs g_xr_host_instance_dispatch_table;
+
+NTSTATUS wine_create_d3d11_session(void *args)
+{
+    @autoreleasepool {
+        struct create_d3d11_session_params *params = args;
+        struct wine_XrInstance *wine_instance = wine_instance_from_handle(params->instance);
+        XrInstance host_instance = wine_instance->host_instance;
+        struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
+        XrGraphicsRequirementsMetalKHR metal_reqs = {
+            .type = XR_TYPE_GRAPHICS_REQUIREMENTS_METAL_KHR,
+        };
+        XrResult res = XR_SUCCESS;
+        id<MTLDevice> device = nil;
+        id<MTLCommandQueue> queue = nil;
+        MTLSharedEventListener *listener = nil;
+
+        if (!funcs->p_xrGetMetalGraphicsRequirementsKHR)
+        {
+            WINE_ERR("XR_KHR_metal_enable not supported by runtime\n");
+            res = XR_ERROR_FUNCTION_UNSUPPORTED;
+            goto out;
+        }
+
+        res = funcs->p_xrGetMetalGraphicsRequirementsKHR(
+            host_instance, params->system_id, &metal_reqs);
+        if (res != XR_SUCCESS)
+        {
+            WINE_ERR("xrGetMetalGraphicsRequirementsKHR failed: %d\n", res);
+            goto out;
+        }
+
+        device = (id<MTLDevice>)metal_reqs.metalDevice;
+        if (!device)
+        {
+            WINE_ERR("metalDevice is NULL\n");
+            res = XR_ERROR_RUNTIME_FAILURE;
+            goto out;
+        }
+        [device retain];
+
+        queue = [device newCommandQueue];
+        if (!queue)
+        {
+            WINE_ERR("newCommandQueue failed\n");
+            res = XR_ERROR_RUNTIME_FAILURE;
+            goto out;
+        }
+
+        listener = [[MTLSharedEventListener alloc] init];
+        if (!listener)
+        {
+            WINE_ERR("MTLSharedEventListener alloc failed\n");
+            res = XR_ERROR_RUNTIME_FAILURE;
+            goto out;
+        }
+
+        {
+            XrGraphicsBindingMetalKHR metal_binding = {
+                .type = XR_TYPE_GRAPHICS_BINDING_METAL_KHR,
+                .next = NULL,
+                .commandQueue = (void *)queue,
+            };
+            XrSessionCreateInfo session_info = {
+                .type = XR_TYPE_SESSION_CREATE_INFO,
+                .next = &metal_binding,
+                .systemId = params->system_id,
+            };
+
+            res = funcs->p_xrCreateSession(
+                host_instance, &session_info, params->session);
+        }
+
+        if (res != XR_SUCCESS)
+        {
+            WINE_ERR("xrCreateSession (Metal) failed: %d\n", res);
+            goto out;
+        }
+
+        params->mtl_device = (void *)device;
+        params->mtl_command_queue = (void *)queue;
+        params->mtl_listener = (void *)listener;
+        device = nil;
+        queue = nil;
+        listener = nil;
+
+out:
+        [listener release];
+        [queue release];
+        [device release];
+        params->result = res;
+        return STATUS_SUCCESS;
+    }
+}
+
+NTSTATUS wine_release_metal_session(void *args)
+{
+    @autoreleasepool {
+        struct release_metal_session_params *params = args;
+
+        [(MTLSharedEventListener *)params->mtl_listener release];
+        [(id<MTLCommandQueue>)params->mtl_command_queue release];
+        [(id<MTLDevice>)params->mtl_device release];
+
+        return STATUS_SUCCESS;
+    }
+}
+
+NTSTATUS wine_xrGetD3D11GraphicsRequirementsKHR(void *args)
+{
+    @autoreleasepool {
+        struct xrGetD3D11GraphicsRequirementsKHR_params *params = args;
+        struct wine_XrInstance *wine_instance = wine_instance_from_handle(params->instance);
+        struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
+        XrGraphicsRequirementsMetalKHR metal_reqs = {
+            .type = XR_TYPE_GRAPHICS_REQUIREMENTS_METAL_KHR,
+        };
+
+        if (!funcs->p_xrGetMetalGraphicsRequirementsKHR)
+        {
+            params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
+            return STATUS_SUCCESS;
+        }
+
+        params->result = funcs->p_xrGetMetalGraphicsRequirementsKHR(
+            wine_instance->host_instance, params->systemId, &metal_reqs);
+
+        if (params->result == XR_SUCCESS)
+        {
+            params->graphicsRequirements->type = XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR;
+            params->graphicsRequirements->minFeatureLevel = 0xb000; /* D3D_FEATURE_LEVEL_11_0 */
+
+            if (metal_reqs.metalDevice)
+            {
+                /* DXMT bit-casts bswap64(MTLDevice.registryID) into LUID */
+                uint64_t reg_id = [(id<MTLDevice>)metal_reqs.metalDevice registryID];
+                uint64_t swapped = __builtin_bswap64(reg_id);
+                memcpy(&params->graphicsRequirements->adapterLuid, &swapped, sizeof(swapped));
+            }
+            else
+            {
+                WINE_ERR("metalDevice is NULL from requirements\n");
+                params->result = XR_ERROR_RUNTIME_FAILURE;
+            }
+        }
+
+        return STATUS_SUCCESS;
+    }
+}
+
+NTSTATUS wine_export_metal_textures(void *args)
+{
+    @autoreleasepool {
+        struct export_metal_textures_params *params = args;
+        struct wine_XrSwapchain *wine_swapchain = wine_swapchain_from_handle(params->swapchain);
+        struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
+        XrSwapchain host_swapchain = wine_swapchain->host_swapchain;
+        XrSwapchainImageMetalKHR *metal_images = NULL;
+        uint32_t count = 0, i;
+        XrResult res;
+
+        if (!funcs->p_xrEnumerateSwapchainImages)
+        {
+            params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
+            return STATUS_SUCCESS;
+        }
+
+        res = funcs->p_xrEnumerateSwapchainImages(host_swapchain, 0, &count, NULL);
+        if (res != XR_SUCCESS)
+        {
+            params->result = res;
+            return STATUS_SUCCESS;
+        }
+
+        if (count > params->image_count)
+        {
+            params->image_count = count;
+            params->result = XR_ERROR_SIZE_INSUFFICIENT;
+            return STATUS_SUCCESS;
+        }
+
+        metal_images = calloc(count, sizeof(*metal_images));
+        if (!metal_images)
+        {
+            params->result = XR_ERROR_OUT_OF_MEMORY;
+            return STATUS_SUCCESS;
+        }
+
+        for (i = 0; i < count; i++)
+        {
+            metal_images[i].type = XR_TYPE_SWAPCHAIN_IMAGE_METAL_KHR;
+            metal_images[i].next = NULL;
+        }
+
+        res = funcs->p_xrEnumerateSwapchainImages(
+            host_swapchain, count, &count, (XrSwapchainImageBaseHeader *)metal_images);
+        if (res != XR_SUCCESS)
+        {
+            free(metal_images);
+            params->result = res;
+            return STATUS_SUCCESS;
+        }
+
+        for (i = 0; i < count; i++)
+            params->mtl_textures[i] = (uint64_t)(uintptr_t)metal_images[i].texture;
+
+        free(metal_images);
+
+        params->image_count = count;
+        params->width = wine_swapchain->create_info.width;
+        params->height = wine_swapchain->create_info.height;
+        params->array_size = wine_swapchain->create_info.arraySize;
+        params->dxgi_format = wine_swapchain->create_info.format;
+
+        params->result = XR_SUCCESS;
+        return STATUS_SUCCESS;
+    }
+}

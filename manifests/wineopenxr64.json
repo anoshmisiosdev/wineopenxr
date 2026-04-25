@@ -1,0 +1,7 @@
+{
+    "file_format_version": "1.0.0",
+    "runtime": {
+        "name": "wineopenxr",
+        "library_path": "wineopenxr.dll"
+    }
+}

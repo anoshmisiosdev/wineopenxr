@@ -1,0 +1,15 @@
+# CMake
+build/
+cmake-build-*/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# IDE
+.idea/
+.cache/
+.vscode/
+
+# macOS
+.DS_Store
