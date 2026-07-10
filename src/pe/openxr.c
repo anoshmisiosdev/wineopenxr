@@ -248,13 +248,7 @@ XrResult WINAPI xrCreateInstance(const XrInstanceCreateInfo *createInfo,
     return XR_SUCCESS;
 }
 
-static void release_dxmt_refs(struct wine_XrSession *sess);
-static void release_session_com_refs(struct wine_XrSession *sess);
-static void release_metal_session_handles(struct wine_XrSession *sess);
-static void free_session(struct wine_XrSession *sess);
-static void abandon_partial_session(struct wine_XrSession *sess);
-static void release_imported_d3d11_textures(XrSwapchainImageD3D11KHR *images,
-                                            uint32_t count);
+static void session_teardown(struct wine_XrSession *session);
 
 XrResult WINAPI xrDestroyInstance(XrInstance instance)
 {
@@ -282,29 +276,6 @@ XrResult WINAPI xrDestroyInstance(XrInstance instance)
     }
     LeaveCriticalSection(&primary_session_lock);
 
-    /* Teardown order.
-     *   1. D3D11, DXMT, and fence Release before the native destroy. App
-     *      D3D11 texture wrappers point into native-owned MTLTextures. We
-     *      must drop our retains while those MTLTextures are still live,
-     *      otherwise the wrappers dangle when native xrDestroyInstance
-     *      tears down the compositor-owned backing.
-     *   2. Native xrDestroyInstance.
-     *   3. Metal device and command queue Release on the Unix side.
-     *      These are app-retained (see
-     *      wine_create_d3d11_session), not runtime-owned, so their
-     *      lifetime is independent of native destroy.
-     *
-     * Safety depends on the OpenXR spec contract that xrDestroyInstance is
-     * called after xrDestroySession, which in turn follows xrEndSession. A
-     * well-behaved app has drained GPU work by the time we land here.
-     * Apps that violate this ordering are in UB per spec.
-     *
-     * Runs without primary_session_lock because D3D11 and DXMT Release
-     * paths can reenter (debug-layer callbacks, app-installed COM hooks)
-     * and xrPollEvent would want the lock too */
-    if (doomed)
-        release_session_com_refs(doomed);
-
     status = UNIX_CALL(xrDestroyInstance, &params);
     if (status)
         WINE_ERR("xrDestroyInstance unix call failed: 0x%x\n", (unsigned)status);
@@ -312,10 +283,7 @@ XrResult WINAPI xrDestroyInstance(XrInstance instance)
         WINE_WARN("xrDestroyInstance failed: %d\n", params.result);
 
     if (doomed)
-    {
-        release_metal_session_handles(doomed);
-        free_session(doomed);
-    }
+        session_teardown(doomed);
 
     free(wine_instance);
 
@@ -348,36 +316,6 @@ static void release_imported_d3d11_textures(XrSwapchainImageD3D11KHR *images,
         ID3D11Texture2D_Release(images[i].texture);
 }
 
-static void release_swapchain_d3d11_refs(struct wine_XrSession *sess)
-{
-    struct list *sc_ptr;
-    for (sc_ptr = sess->swapchain_list.next;
-         sc_ptr != &sess->swapchain_list;
-         sc_ptr = sc_ptr->next)
-    {
-        struct wine_XrSwapchain *sc =
-            CONTAINING_RECORD(sc_ptr, struct wine_XrSwapchain, entry);
-        if (sc->images)
-            release_imported_d3d11_textures((XrSwapchainImageD3D11KHR *)sc->images,
-                                            sc->image_count);
-    }
-}
-
-static void free_swapchain_wrappers(struct wine_XrSession *sess)
-{
-    struct list *sc_ptr, *sc_next;
-    for (sc_ptr = sess->swapchain_list.next;
-         sc_ptr != &sess->swapchain_list;
-         sc_ptr = sc_next)
-    {
-        struct wine_XrSwapchain *sc =
-            CONTAINING_RECORD(sc_ptr, struct wine_XrSwapchain, entry);
-        sc_next = sc_ptr->next;
-        free(sc->images);
-        free(sc);
-    }
-}
-
 static void release_dxmt_refs(struct wine_XrSession *sess)
 {
     if (sess->d3d11_context4)
@@ -402,60 +340,44 @@ static void release_dxmt_refs(struct wine_XrSession *sess)
     }
 }
 
-static void release_session_com_refs(struct wine_XrSession *sess)
+static void session_teardown(struct wine_XrSession *session)
 {
+    struct list *link, *next_link;
+
     /* Serialize with any concurrent xrCreateSwapchain / xrDestroySwapchain
      * on this session. CRITICAL_SECTION is reentrant */
-    EnterCriticalSection(&sess->swapchain_lock);
-    release_swapchain_d3d11_refs(sess);
-    LeaveCriticalSection(&sess->swapchain_lock);
-
-    if (sess->gpu_fence)
+    EnterCriticalSection(&session->swapchain_lock);
+    for (link = session->swapchain_list.next;
+         link != &session->swapchain_list;
+         link = next_link)
     {
-        ((IUnknown *)sess->gpu_fence)->lpVtbl->Release((IUnknown *)sess->gpu_fence);
-        sess->gpu_fence = NULL;
+        struct wine_XrSwapchain *swapchain =
+            CONTAINING_RECORD(link, struct wine_XrSwapchain, entry);
+        next_link = link->next;
+        if (swapchain->images)
+            release_imported_d3d11_textures((XrSwapchainImageD3D11KHR *)swapchain->images,
+                                            swapchain->image_count);
+        free(swapchain->images);
+        free(swapchain);
     }
+    LeaveCriticalSection(&session->swapchain_lock);
 
-    release_dxmt_refs(sess);
-}
+    if (session->gpu_fence)
+        ID3D11Fence_Release(session->gpu_fence);
 
-static void release_metal_session_handles(struct wine_XrSession *sess)
-{
-    if (sess->mtl_command_queue || sess->mtl_device)
+    release_dxmt_refs(session);
+
+    if (session->mtl_command_queue || session->mtl_device)
     {
         struct release_metal_session_params params = {
-            .mtl_device = sess->mtl_device,
-            .mtl_command_queue = sess->mtl_command_queue,
+            .mtl_device = session->mtl_device,
+            .mtl_command_queue = session->mtl_command_queue,
         };
         UNIX_CALL(release_metal_session, &params);
-        sess->mtl_device = NULL;
-        sess->mtl_command_queue = NULL;
     }
-}
 
-static void free_session(struct wine_XrSession *sess)
-{
-    free_swapchain_wrappers(sess);
-    DeleteCriticalSection(&sess->swapchain_lock);
-    free(sess);
-}
-
-/* Tear down a session that was half-built when xrCreateSession detected a
- * race with xrDestroyInstance. Mirrors xrDestroySession but skips the
- * primary_session clear (we never published) and tolerates missing state */
-static void abandon_partial_session(struct wine_XrSession *sess)
-{
-    struct xrDestroySession_params dparams = {.session = (XrSession)sess};
-    if (sess->host_session)
-    {
-        NTSTATUS s = UNIX_CALL(xrDestroySession, &dparams);
-        if (s)
-            WINE_ERR("xrDestroySession unix call failed during abandon: 0x%x\n",
-                     (unsigned)s);
-    }
-    release_session_com_refs(sess);
-    release_metal_session_handles(sess);
-    free_session(sess);
+    DeleteCriticalSection(&session->swapchain_lock);
+    free(session);
 }
 
 static XrResult create_session_d3d11(struct wine_XrInstance *wine_instance,
@@ -677,9 +599,16 @@ XrResult WINAPI xrCreateSession(XrInstance instance,
     EnterCriticalSection(&primary_session_lock);
     if (wine_instance->destroying || primary_session)
     {
+        struct xrDestroySession_params destroy_params = {.session = (XrSession)wine_session};
+        NTSTATUS destroy_status;
+
         LeaveCriticalSection(&primary_session_lock);
         WINE_WARN("xrCreateSession raced teardown/duplicate, aborting\n");
-        abandon_partial_session(wine_session);
+        destroy_status = UNIX_CALL(xrDestroySession, &destroy_params);
+        if (destroy_status)
+            WINE_ERR("xrDestroySession unix call failed during abandon: 0x%x\n",
+                     (unsigned)destroy_status);
+        session_teardown(wine_session);
         return wine_instance->destroying ? XR_ERROR_INSTANCE_LOST
                                          : XR_ERROR_LIMIT_REACHED;
     }
@@ -714,9 +643,7 @@ XrResult WINAPI xrDestroySession(XrSession session)
     /* Commit to full destruction regardless of native result. A zombie
      * session with a live handle but a dead Metal device is worse than a
      * leaked handle */
-    release_session_com_refs(wine_session);
-    release_metal_session_handles(wine_session);
-    free_session(wine_session);
+    session_teardown(wine_session);
 
     if (status)
         return XR_ERROR_RUNTIME_FAILURE;
