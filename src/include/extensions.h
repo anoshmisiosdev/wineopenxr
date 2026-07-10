@@ -16,6 +16,7 @@ static const char *const xr_bridge_extensions[] =
     "XR_KHR_locate_spaces",
     "XR_KHR_visibility_mask",
     "XR_KHR_win32_convert_performance_counter_time",
+    "XR_META_performance_metrics",
 };
 
 #endif /* __WINE_OPENXR_EXTENSIONS_H */

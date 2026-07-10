@@ -233,6 +233,19 @@ static XrResult WINAPI wine_xrEnumerateInstanceExtensionProperties(const char * 
     return params.result;
 }
 
+static XrResult WINAPI wine_xrEnumeratePerformanceMetricsCounterPathsMETA(XrInstance instance, uint32_t counterPathCapacityInput, uint32_t * counterPathCountOutput, XrPath * counterPaths)
+{
+    struct xrEnumeratePerformanceMetricsCounterPathsMETA_params params;
+
+    params.instance = instance;
+    params.counterPathCapacityInput = counterPathCapacityInput;
+    params.counterPathCountOutput = counterPathCountOutput;
+    params.counterPaths = counterPaths;
+
+    UNIX_CALL(xrEnumeratePerformanceMetricsCounterPathsMETA, &params);
+    return params.result;
+}
+
 static XrResult WINAPI wine_xrEnumerateReferenceSpaces(XrSession session, uint32_t spaceCapacityInput, uint32_t * spaceCountOutput, XrReferenceSpaceType * spaces)
 {
     struct xrEnumerateReferenceSpaces_params params;
@@ -384,6 +397,17 @@ static XrResult WINAPI wine_xrGetInstanceProperties(XrInstance instance, XrInsta
     return params.result;
 }
 
+static XrResult WINAPI wine_xrGetPerformanceMetricsStateMETA(XrSession session, XrPerformanceMetricsStateMETA * state)
+{
+    struct xrGetPerformanceMetricsStateMETA_params params;
+
+    params.session = session;
+    params.state = state;
+
+    UNIX_CALL(xrGetPerformanceMetricsStateMETA, &params);
+    return params.result;
+}
+
 static XrResult WINAPI wine_xrGetReferenceSpaceBoundsRect(XrSession session, XrReferenceSpaceType referenceSpaceType, XrExtent2Df * bounds)
 {
     struct xrGetReferenceSpaceBoundsRect_params params;
@@ -525,6 +549,18 @@ static XrResult WINAPI wine_xrPathToString(XrInstance instance, XrPath path, uin
     return params.result;
 }
 
+static XrResult WINAPI wine_xrQueryPerformanceMetricsCounterMETA(XrSession session, XrPath counterPath, XrPerformanceMetricsCounterMETA * counter)
+{
+    struct xrQueryPerformanceMetricsCounterMETA_params params;
+
+    params.session = session;
+    params.counterPath = counterPath;
+    params.counter = counter;
+
+    UNIX_CALL(xrQueryPerformanceMetricsCounterMETA, &params);
+    return params.result;
+}
+
 static XrResult WINAPI wine_xrRequestDisplayRefreshRateFB(XrSession session, float displayRefreshRate)
 {
     struct xrRequestDisplayRefreshRateFB_params params;
@@ -555,6 +591,17 @@ static XrResult WINAPI wine_xrResultToString(XrInstance instance, XrResult value
     params.buffer = buffer;
 
     UNIX_CALL(xrResultToString, &params);
+    return params.result;
+}
+
+static XrResult WINAPI wine_xrSetPerformanceMetricsStateMETA(XrSession session, const XrPerformanceMetricsStateMETA * state)
+{
+    struct xrSetPerformanceMetricsStateMETA_params params;
+
+    params.session = session;
+    params.state = state;
+
+    UNIX_CALL(xrSetPerformanceMetricsStateMETA, &params);
     return params.result;
 }
 
@@ -685,6 +732,7 @@ static const struct openxr_function xr_function_table[] =
     {"xrEnumerateDisplayRefreshRatesFB", (void *)wine_xrEnumerateDisplayRefreshRatesFB, 1, 0, 0},
     {"xrEnumerateEnvironmentBlendModes", (void *)wine_xrEnumerateEnvironmentBlendModes, -1, 0, 0},
     {"xrEnumerateInstanceExtensionProperties", (void *)wine_xrEnumerateInstanceExtensionProperties, -1, 0, 1},
+    {"xrEnumeratePerformanceMetricsCounterPathsMETA", (void *)wine_xrEnumeratePerformanceMetricsCounterPathsMETA, 12, 0, 0},
     {"xrEnumerateReferenceSpaces", (void *)wine_xrEnumerateReferenceSpaces, -1, 0, 0},
     {"xrEnumerateSwapchainFormats", (void *)wine_xrEnumerateSwapchainFormats, -1, 0, 0},
     {"xrEnumerateSwapchainImages", (void *)xrEnumerateSwapchainImages, -1, 0, 0},
@@ -700,6 +748,7 @@ static const struct openxr_function xr_function_table[] =
     {"xrGetInputSourceLocalizedName", (void *)wine_xrGetInputSourceLocalizedName, -1, 0, 0},
     {"xrGetInstanceProcAddr", (void *)xrGetInstanceProcAddr, -1, 0, 0},
     {"xrGetInstanceProperties", (void *)wine_xrGetInstanceProperties, -1, 0, 0},
+    {"xrGetPerformanceMetricsStateMETA", (void *)wine_xrGetPerformanceMetricsStateMETA, 12, 0, 0},
     {"xrGetReferenceSpaceBoundsRect", (void *)wine_xrGetReferenceSpaceBoundsRect, -1, 0, 0},
     {"xrGetSystem", (void *)wine_xrGetSystem, -1, 0, 0},
     {"xrGetSystemProperties", (void *)wine_xrGetSystemProperties, -1, 0, 0},
@@ -712,10 +761,12 @@ static const struct openxr_function xr_function_table[] =
     {"xrLocateViews", (void *)wine_xrLocateViews, -1, 0, 0},
     {"xrPathToString", (void *)wine_xrPathToString, -1, 0, 0},
     {"xrPollEvent", (void *)xrPollEvent, -1, 0, 0},
+    {"xrQueryPerformanceMetricsCounterMETA", (void *)wine_xrQueryPerformanceMetricsCounterMETA, 12, 0, 0},
     {"xrReleaseSwapchainImage", (void *)xrReleaseSwapchainImage, -1, 0, 0},
     {"xrRequestDisplayRefreshRateFB", (void *)wine_xrRequestDisplayRefreshRateFB, 1, 0, 0},
     {"xrRequestExitSession", (void *)wine_xrRequestExitSession, -1, 0, 0},
     {"xrResultToString", (void *)wine_xrResultToString, -1, 0, 0},
+    {"xrSetPerformanceMetricsStateMETA", (void *)wine_xrSetPerformanceMetricsStateMETA, 12, 0, 0},
     {"xrStopHapticFeedback", (void *)wine_xrStopHapticFeedback, -1, 0, 0},
     {"xrStringToPath", (void *)wine_xrStringToPath, -1, 0, 0},
     {"xrStructureTypeToString", (void *)wine_xrStructureTypeToString, -1, 0, 0},

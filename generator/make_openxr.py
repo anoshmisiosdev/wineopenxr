@@ -94,6 +94,7 @@ SUPPORTED_EXTENSIONS = frozenset({
     "XR_KHR_extended_struct_name_lengths",
     "XR_EXT_hand_tracking",
     "XR_FB_display_refresh_rate",
+    "XR_META_performance_metrics",
     "XR_KHR_composition_layer_cylinder",
     "XR_KHR_composition_layer_equirect",
     "XR_KHR_composition_layer_equirect2",

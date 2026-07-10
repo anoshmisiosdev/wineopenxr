@@ -266,6 +266,19 @@ static NTSTATUS thunk_xrEnumerateEnvironmentBlendModes(void *args)
     return STATUS_SUCCESS;
 }
 
+static NTSTATUS thunk_xrEnumeratePerformanceMetricsCounterPathsMETA(void *args)
+{
+    struct xrEnumeratePerformanceMetricsCounterPathsMETA_params *params = args;
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrEnumeratePerformanceMetricsCounterPathsMETA(
+        wine_instance_from_handle(params->instance)->host_instance,
+        params->counterPathCapacityInput,
+        params->counterPathCountOutput,
+        params->counterPaths);
+
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS thunk_xrEnumerateReferenceSpaces(void *args)
 {
     struct xrEnumerateReferenceSpaces_params *params = args;
@@ -413,6 +426,17 @@ static NTSTATUS thunk_xrGetInstanceProperties(void *args)
     params->result = g_xr_host_instance_dispatch_table.p_xrGetInstanceProperties(
         wine_instance_from_handle(params->instance)->host_instance,
         params->instanceProperties);
+
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS thunk_xrGetPerformanceMetricsStateMETA(void *args)
+{
+    struct xrGetPerformanceMetricsStateMETA_params *params = args;
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrGetPerformanceMetricsStateMETA(
+        wine_session_from_handle(params->session)->host_session,
+        params->state);
 
     return STATUS_SUCCESS;
 }
@@ -569,6 +593,18 @@ static NTSTATUS thunk_xrPollEvent(void *args)
     return STATUS_SUCCESS;
 }
 
+static NTSTATUS thunk_xrQueryPerformanceMetricsCounterMETA(void *args)
+{
+    struct xrQueryPerformanceMetricsCounterMETA_params *params = args;
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrQueryPerformanceMetricsCounterMETA(
+        wine_session_from_handle(params->session)->host_session,
+        params->counterPath,
+        params->counter);
+
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS thunk_xrRequestDisplayRefreshRateFB(void *args)
 {
     struct xrRequestDisplayRefreshRateFB_params *params = args;
@@ -598,6 +634,17 @@ static NTSTATUS thunk_xrResultToString(void *args)
         wine_instance_from_handle(params->instance)->host_instance,
         params->value,
         params->buffer);
+
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS thunk_xrSetPerformanceMetricsStateMETA(void *args)
+{
+    struct xrSetPerformanceMetricsStateMETA_params *params = args;
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrSetPerformanceMetricsStateMETA(
+        wine_session_from_handle(params->session)->host_session,
+        params->state);
 
     return STATUS_SUCCESS;
 }
@@ -720,6 +767,7 @@ const struct openxr_instance_function openxr_instance_functions[] =
     {"xrEnumerateBoundSourcesForAction", offsetof(struct openxr_instance_funcs, p_xrEnumerateBoundSourcesForAction), NULL},
     {"xrEnumerateDisplayRefreshRatesFB", offsetof(struct openxr_instance_funcs, p_xrEnumerateDisplayRefreshRatesFB), "XR_FB_display_refresh_rate"},
     {"xrEnumerateEnvironmentBlendModes", offsetof(struct openxr_instance_funcs, p_xrEnumerateEnvironmentBlendModes), NULL},
+    {"xrEnumeratePerformanceMetricsCounterPathsMETA", offsetof(struct openxr_instance_funcs, p_xrEnumeratePerformanceMetricsCounterPathsMETA), "XR_META_performance_metrics"},
     {"xrEnumerateReferenceSpaces", offsetof(struct openxr_instance_funcs, p_xrEnumerateReferenceSpaces), NULL},
     {"xrEnumerateSwapchainFormats", offsetof(struct openxr_instance_funcs, p_xrEnumerateSwapchainFormats), NULL},
     {"xrEnumerateSwapchainImages", offsetof(struct openxr_instance_funcs, p_xrEnumerateSwapchainImages), NULL},
@@ -733,6 +781,7 @@ const struct openxr_instance_function openxr_instance_functions[] =
     {"xrGetDisplayRefreshRateFB", offsetof(struct openxr_instance_funcs, p_xrGetDisplayRefreshRateFB), "XR_FB_display_refresh_rate"},
     {"xrGetInputSourceLocalizedName", offsetof(struct openxr_instance_funcs, p_xrGetInputSourceLocalizedName), NULL},
     {"xrGetInstanceProperties", offsetof(struct openxr_instance_funcs, p_xrGetInstanceProperties), NULL},
+    {"xrGetPerformanceMetricsStateMETA", offsetof(struct openxr_instance_funcs, p_xrGetPerformanceMetricsStateMETA), "XR_META_performance_metrics"},
     {"xrGetReferenceSpaceBoundsRect", offsetof(struct openxr_instance_funcs, p_xrGetReferenceSpaceBoundsRect), NULL},
     {"xrGetSystem", offsetof(struct openxr_instance_funcs, p_xrGetSystem), NULL},
     {"xrGetSystemProperties", offsetof(struct openxr_instance_funcs, p_xrGetSystemProperties), NULL},
@@ -745,10 +794,12 @@ const struct openxr_instance_function openxr_instance_functions[] =
     {"xrLocateViews", offsetof(struct openxr_instance_funcs, p_xrLocateViews), NULL},
     {"xrPathToString", offsetof(struct openxr_instance_funcs, p_xrPathToString), NULL},
     {"xrPollEvent", offsetof(struct openxr_instance_funcs, p_xrPollEvent), NULL},
+    {"xrQueryPerformanceMetricsCounterMETA", offsetof(struct openxr_instance_funcs, p_xrQueryPerformanceMetricsCounterMETA), "XR_META_performance_metrics"},
     {"xrReleaseSwapchainImage", offsetof(struct openxr_instance_funcs, p_xrReleaseSwapchainImage), NULL},
     {"xrRequestDisplayRefreshRateFB", offsetof(struct openxr_instance_funcs, p_xrRequestDisplayRefreshRateFB), "XR_FB_display_refresh_rate"},
     {"xrRequestExitSession", offsetof(struct openxr_instance_funcs, p_xrRequestExitSession), NULL},
     {"xrResultToString", offsetof(struct openxr_instance_funcs, p_xrResultToString), NULL},
+    {"xrSetPerformanceMetricsStateMETA", offsetof(struct openxr_instance_funcs, p_xrSetPerformanceMetricsStateMETA), "XR_META_performance_metrics"},
     {"xrStopHapticFeedback", offsetof(struct openxr_instance_funcs, p_xrStopHapticFeedback), NULL},
     {"xrStringToPath", offsetof(struct openxr_instance_funcs, p_xrStringToPath), NULL},
     {"xrStructureTypeToString", offsetof(struct openxr_instance_funcs, p_xrStructureTypeToString), NULL},
@@ -803,6 +854,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     thunk_xrEnumerateDisplayRefreshRatesFB,
     thunk_xrEnumerateEnvironmentBlendModes,
     wine_xrEnumerateInstanceExtensionProperties,
+    thunk_xrEnumeratePerformanceMetricsCounterPathsMETA,
     thunk_xrEnumerateReferenceSpaces,
     wine_xrEnumerateSwapchainFormats,
     thunk_xrEnumerateSwapchainImages,
@@ -817,6 +869,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     thunk_xrGetDisplayRefreshRateFB,
     thunk_xrGetInputSourceLocalizedName,
     thunk_xrGetInstanceProperties,
+    thunk_xrGetPerformanceMetricsStateMETA,
     thunk_xrGetReferenceSpaceBoundsRect,
     thunk_xrGetSystem,
     thunk_xrGetSystemProperties,
@@ -829,10 +882,12 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     thunk_xrLocateViews,
     thunk_xrPathToString,
     thunk_xrPollEvent,
+    thunk_xrQueryPerformanceMetricsCounterMETA,
     wine_xrReleaseSwapchainImage,
     thunk_xrRequestDisplayRefreshRateFB,
     thunk_xrRequestExitSession,
     thunk_xrResultToString,
+    thunk_xrSetPerformanceMetricsStateMETA,
     thunk_xrStopHapticFeedback,
     thunk_xrStringToPath,
     thunk_xrStructureTypeToString,

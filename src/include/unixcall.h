@@ -43,6 +43,7 @@ enum unix_call
     unix_xrEnumerateDisplayRefreshRatesFB,
     unix_xrEnumerateEnvironmentBlendModes,
     unix_xrEnumerateInstanceExtensionProperties,
+    unix_xrEnumeratePerformanceMetricsCounterPathsMETA,
     unix_xrEnumerateReferenceSpaces,
     unix_xrEnumerateSwapchainFormats,
     unix_xrEnumerateSwapchainImages,
@@ -57,6 +58,7 @@ enum unix_call
     unix_xrGetDisplayRefreshRateFB,
     unix_xrGetInputSourceLocalizedName,
     unix_xrGetInstanceProperties,
+    unix_xrGetPerformanceMetricsStateMETA,
     unix_xrGetReferenceSpaceBoundsRect,
     unix_xrGetSystem,
     unix_xrGetSystemProperties,
@@ -69,10 +71,12 @@ enum unix_call
     unix_xrLocateViews,
     unix_xrPathToString,
     unix_xrPollEvent,
+    unix_xrQueryPerformanceMetricsCounterMETA,
     unix_xrReleaseSwapchainImage,
     unix_xrRequestDisplayRefreshRateFB,
     unix_xrRequestExitSession,
     unix_xrResultToString,
+    unix_xrSetPerformanceMetricsStateMETA,
     unix_xrStopHapticFeedback,
     unix_xrStringToPath,
     unix_xrStructureTypeToString,
@@ -84,7 +88,7 @@ enum unix_call
     unix_count,
 };
 
-#define XR_BRIDGE_EXTENSION_COUNT 12
+#define XR_BRIDGE_EXTENSION_COUNT 13
 
 struct xrAcquireSwapchainImage_params
 {
@@ -280,6 +284,15 @@ struct xrEnumerateInstanceExtensionProperties_params
     XrResult result;
 };
 
+struct xrEnumeratePerformanceMetricsCounterPathsMETA_params
+{
+    XrInstance instance;
+    uint32_t counterPathCapacityInput;
+    uint32_t * counterPathCountOutput;
+    XrPath * counterPaths;
+    XrResult result;
+};
+
 struct xrEnumerateReferenceSpaces_params
 {
     XrSession session;
@@ -392,6 +405,13 @@ struct xrGetInstanceProperties_params
     XrResult result;
 };
 
+struct xrGetPerformanceMetricsStateMETA_params
+{
+    XrSession session;
+    XrPerformanceMetricsStateMETA * state;
+    XrResult result;
+};
+
 struct xrGetReferenceSpaceBoundsRect_params
 {
     XrSession session;
@@ -496,6 +516,14 @@ struct xrPollEvent_params
     XrResult result;
 };
 
+struct xrQueryPerformanceMetricsCounterMETA_params
+{
+    XrSession session;
+    XrPath counterPath;
+    XrPerformanceMetricsCounterMETA * counter;
+    XrResult result;
+};
+
 struct xrReleaseSwapchainImage_params
 {
     XrSwapchain swapchain;
@@ -522,6 +550,13 @@ struct xrResultToString_params
     XrInstance instance;
     XrResult value;
     char * buffer;
+    XrResult result;
+};
+
+struct xrSetPerformanceMetricsStateMETA_params
+{
+    XrSession session;
+    const XrPerformanceMetricsStateMETA * state;
     XrResult result;
 };
 
