@@ -2,8 +2,8 @@
 
 /* Raw integer constants because PE lacks Metal enums and Unix lacks dxgi.h */
 
-#ifndef __WINE_OPENXR_FORMAT_TABLE_H
-#define __WINE_OPENXR_FORMAT_TABLE_H
+#ifndef __WINE_OPENXR_FORMATS_H
+#define __WINE_OPENXR_FORMATS_H
 
 #include <stdint.h>
 
@@ -70,4 +70,4 @@ static inline int64_t dxgi_typeless_parent(int64_t dxgi)
     }
 }
 
-#endif /* __WINE_OPENXR_FORMAT_TABLE_H */
+#endif /* __WINE_OPENXR_FORMATS_H */

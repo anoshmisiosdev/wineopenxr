@@ -15,10 +15,11 @@
 
 #include <wine/debug.h>
 
-#include "openxr_loader.h"
+#include "bridge.h"
 #include "openxr/openxr_loader_negotiation.h"
-#include "dxmt_interop.h"
-#include "format_table.h"
+#include "dxmt.h"
+#include "formats.h"
+#include "events.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(openxr);
 
@@ -77,6 +78,9 @@ XrResult WINAPI xrGetInstanceProcAddr(XrInstance instance,
                                       const char *name,
                                       PFN_xrVoidFunction *function)
 {
+    const struct openxr_function *entry;
+    struct wine_XrInstance *wine_instance;
+
     WINE_TRACE("instance=%p name=%s\n",
                (void *)(uintptr_t)instance, wine_dbgstr_a(name));
 
@@ -86,47 +90,50 @@ XrResult WINAPI xrGetInstanceProcAddr(XrInstance instance,
     if (!name)
         return XR_ERROR_VALIDATION_FAILURE;
 
+    if (!strcmp(name, "xrInitializeLoaderKHR"))
+        return XR_ERROR_FUNCTION_UNSUPPORTED;
+
+    entry = wine_xr_find_function(name);
+
     if (!instance)
     {
-        if (!strcmp(name, "xrEnumerateInstanceExtensionProperties") ||
-            !strcmp(name, "xrCreateInstance"))
+        if (entry && entry->global)
         {
-            *function = wine_xr_get_instance_proc_addr(name);
-            if (*function)
-                return XR_SUCCESS;
+            *function = (PFN_xrVoidFunction)entry->pfn;
+            return XR_SUCCESS;
         }
         return XR_ERROR_HANDLE_INVALID;
     }
 
-    {
-        struct is_available_instance_function_params params = {
-            .instance = instance,
-            .name = name,
-        };
-        NTSTATUS status = UNIX_CALL(is_available_instance_function, &params);
-        if (status)
-        {
-            WINE_ERR("is_available_instance_function unix call failed: 0x%x\n",
-                     (unsigned)status);
-            return XR_ERROR_RUNTIME_FAILURE;
-        }
+    if (!entry)
+        return XR_ERROR_FUNCTION_UNSUPPORTED;
 
-        if (!params.available)
-        {
-            WINE_TRACE("Function %s not provided by native runtime\n",
-                       wine_dbgstr_a(name));
+    wine_instance = wine_instance_from_handle(instance);
+    if (entry->extension >= 0)
+    {
+        if (!(wine_instance->enabled_extensions[entry->extension / 64]
+              & (1ull << (entry->extension % 64))))
             return XR_ERROR_FUNCTION_UNSUPPORTED;
-        }
     }
-
-    *function = wine_xr_get_instance_proc_addr(name);
-    if (!*function)
+    else if (XR_VERSION_MINOR(wine_instance->api_version) < entry->core_minor)
     {
-        WINE_WARN("Function %s advertised by native runtime but no PE thunk\n",
-                  wine_dbgstr_a(name));
         return XR_ERROR_FUNCTION_UNSUPPORTED;
     }
 
+    *function = (PFN_xrVoidFunction)entry->pfn;
+    return XR_SUCCESS;
+}
+
+XrResult WINAPI xrEnumerateApiLayerProperties(uint32_t propertyCapacityInput,
+                                              uint32_t *propertyCountOutput,
+                                              XrApiLayerProperties *properties)
+{
+    (void)propertyCapacityInput;
+    (void)properties;
+
+    if (!propertyCountOutput)
+        return XR_ERROR_VALIDATION_FAILURE;
+    *propertyCountOutput = 0;
     return XR_SUCCESS;
 }
 
@@ -149,14 +156,14 @@ XrResult WINAPI xrNegotiateLoaderRuntimeInterface(
         loaderInfo->structSize != sizeof(XrNegotiateLoaderInfo))
     {
         WINE_ERR("negotiate: loader info validation failed\n");
-        return XR_ERROR_VALIDATION_FAILURE;
+        return XR_ERROR_INITIALIZATION_FAILED;
     }
 
     if (loaderInfo->minInterfaceVersion > XR_CURRENT_LOADER_RUNTIME_VERSION ||
         loaderInfo->maxInterfaceVersion < XR_CURRENT_LOADER_RUNTIME_VERSION)
     {
         WINE_ERR("negotiate: interface version check failed\n");
-        return XR_ERROR_VALIDATION_FAILURE;
+        return XR_ERROR_INITIALIZATION_FAILED;
     }
 
     if (runtimeRequest->structType != XR_LOADER_INTERFACE_STRUCT_RUNTIME_REQUEST ||
@@ -167,7 +174,7 @@ XrResult WINAPI xrNegotiateLoaderRuntimeInterface(
                  "type=%u ver=%u size=%u\n",
                  runtimeRequest->structType, runtimeRequest->structVersion,
                  (unsigned)runtimeRequest->structSize);
-        return XR_ERROR_VALIDATION_FAILURE;
+        return XR_ERROR_INITIALIZATION_FAILED;
     }
 
     status = UNIX_CALL(init, &init_params);
@@ -195,9 +202,13 @@ XrResult WINAPI xrCreateInstance(const XrInstanceCreateInfo *createInfo,
 {
     struct wine_XrInstance *wine_instance;
     struct xrCreateInstance_params params;
+    uint32_t extension_index;
     NTSTATUS status;
 
     WINE_TRACE("createInfo=%p, instance=%p\n", createInfo, instance);
+
+    if (!createInfo || !instance)
+        return XR_ERROR_VALIDATION_FAILURE;
 
     wine_instance = calloc(1, sizeof(*wine_instance));
     if (!wine_instance)
@@ -219,6 +230,16 @@ XrResult WINAPI xrCreateInstance(const XrInstanceCreateInfo *createInfo,
         WINE_WARN("xrCreateInstance failed: %d\n", params.result);
         free(wine_instance);
         return params.result;
+    }
+
+    wine_instance->api_version = createInfo->applicationInfo.apiVersion;
+    for (extension_index = 0;
+         extension_index < createInfo->enabledExtensionCount;
+         extension_index++)
+    {
+        int bit = wine_xr_extension_index(createInfo->enabledExtensionNames[extension_index]);
+        if (bit >= 0)
+            wine_instance->enabled_extensions[bit / 64] |= 1ull << (bit % 64);
     }
 
     *instance = (XrInstance)wine_instance;
@@ -243,6 +264,10 @@ XrResult WINAPI xrDestroyInstance(XrInstance instance)
     NTSTATUS status;
 
     WINE_TRACE("instance=%p\n", wine_instance);
+
+    if (!instance) {
+        return XR_ERROR_HANDLE_INVALID;
+    }
 
     /* Set destroying under primary_session_lock so a concurrent
      * xrCreateSession that is about to publish into primary_session either
@@ -1175,13 +1200,9 @@ XrResult WINAPI xrEndFrame(XrSession session,
             break;
         }
         default:
-            /* Pass unknown layer types through verbatim with the wrapper
-             * handle. The native runtime rejects the layer rather than us
-             * failing the whole frame over one unrecognized type */
-            WINE_WARN("unsupported composition layer type %u, passing through\n",
-                      layer->type);
-            host_layers[i] = layer;
-            break;
+            WINE_WARN("unsupported composition layer type %u\n", layer->type);
+            result = XR_ERROR_LAYER_INVALID;
+            goto cleanup;
         }
     }
 
@@ -1227,31 +1248,19 @@ static BOOL rewrite_event_session(XrEventDataBuffer *eventData, XrSession *sessi
 {
     XrBaseOutStructure *base = (XrBaseOutStructure *)eventData;
     XrSession *event_session;
+    unsigned int i;
 
-    switch (base->type)
+    for (i = 0; i < sizeof(xr_session_events) / sizeof(xr_session_events[0]); i++)
     {
-    case XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED:
-        event_session = &((XrEventDataSessionStateChanged *)eventData)->session;
-        break;
-    case XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED:
-        event_session = &((XrEventDataInteractionProfileChanged *)eventData)->session;
-        break;
-    case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING:
-        event_session = &((XrEventDataReferenceSpaceChangePending *)eventData)->session;
-        break;
-    case XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR:
-        event_session = &((XrEventDataVisibilityMaskChangedKHR *)eventData)->session;
-        break;
-    case XR_TYPE_EVENT_DATA_USER_PRESENCE_CHANGED_EXT:
-        event_session = &((XrEventDataUserPresenceChangedEXT *)eventData)->session;
-        break;
-    default:
-        return FALSE;
+        if (xr_session_events[i].type != base->type)
+            continue;
+        event_session = (XrSession *)((char *)eventData + xr_session_events[i].session_offset);
+        *session = wine_session_for_host(*event_session);
+        *event_session = *session;
+        return TRUE;
     }
 
-    *session = wine_session_for_host(*event_session);
-    *event_session = *session;
-    return TRUE;
+    return FALSE;
 }
 
 XrResult WINAPI xrPollEvent(XrInstance instance, XrEventDataBuffer *eventData)

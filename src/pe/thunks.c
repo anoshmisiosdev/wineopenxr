@@ -4,273 +4,210 @@
 #include <string.h>
 #include <windows.h>
 
-/* Platform guards so platform-typed PARAMS structs and thunks compile */
 #define XR_USE_GRAPHICS_API_D3D11
 #define XR_USE_PLATFORM_WIN32
 
-#include "openxr_loader.h"
-#include "loader_thunks.h"
+#include "bridge.h"
+#include "unixcall.h"
+#include "extensions.h"
 
 static XrResult WINAPI wine_xrAcquireSwapchainImage(XrSwapchain swapchain, const XrSwapchainImageAcquireInfo * acquireInfo, uint32_t * index)
 {
     struct xrAcquireSwapchainImage_params params;
-    NTSTATUS status;
 
     params.swapchain = swapchain;
-    params.acquireInfo = (const XrSwapchainImageAcquireInfo *)acquireInfo;
+    params.acquireInfo = acquireInfo;
     params.index = index;
 
-    status = UNIX_CALL(xrAcquireSwapchainImage, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrAcquireSwapchainImage, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrApplyHapticFeedback(XrSession session, const XrHapticActionInfo * hapticActionInfo, const XrHapticBaseHeader * hapticFeedback)
 {
     struct xrApplyHapticFeedback_params params;
-    NTSTATUS status;
 
     params.session = session;
-    params.hapticActionInfo = (const XrHapticActionInfo *)hapticActionInfo;
-    params.hapticFeedback = (const XrHapticBaseHeader *)hapticFeedback;
+    params.hapticActionInfo = hapticActionInfo;
+    params.hapticFeedback = hapticFeedback;
 
-    status = UNIX_CALL(xrApplyHapticFeedback, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrApplyHapticFeedback, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrAttachSessionActionSets(XrSession session, const XrSessionActionSetsAttachInfo * attachInfo)
 {
     struct xrAttachSessionActionSets_params params;
-    NTSTATUS status;
 
     params.session = session;
-    params.attachInfo = (const XrSessionActionSetsAttachInfo *)attachInfo;
+    params.attachInfo = attachInfo;
 
-    status = UNIX_CALL(xrAttachSessionActionSets, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrAttachSessionActionSets, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrBeginFrame(XrSession session, const XrFrameBeginInfo * frameBeginInfo)
 {
     struct xrBeginFrame_params params;
-    NTSTATUS status;
 
     params.session = session;
-    params.frameBeginInfo = (const XrFrameBeginInfo *)frameBeginInfo;
+    params.frameBeginInfo = frameBeginInfo;
 
-    status = UNIX_CALL(xrBeginFrame, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrBeginFrame, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrBeginSession(XrSession session, const XrSessionBeginInfo * beginInfo)
 {
     struct xrBeginSession_params params;
-    NTSTATUS status;
 
     params.session = session;
-    params.beginInfo = (const XrSessionBeginInfo *)beginInfo;
+    params.beginInfo = beginInfo;
 
-    status = UNIX_CALL(xrBeginSession, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
-    return params.result;
-}
-
-static XrResult WINAPI wine_xrConvertTimeToTimespecTimeKHR(XrInstance instance, XrTime time, struct timespec * timespecTime)
-{
-    struct xrConvertTimeToTimespecTimeKHR_params params;
-    NTSTATUS status;
-
-    params.instance = instance;
-    params.time = time;
-    params.timespecTime = timespecTime;
-
-    status = UNIX_CALL(xrConvertTimeToTimespecTimeKHR, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
-    return params.result;
-}
-
-static XrResult WINAPI wine_xrConvertTimespecTimeToTimeKHR(XrInstance instance, const struct timespec * timespecTime, XrTime * time)
-{
-    struct xrConvertTimespecTimeToTimeKHR_params params;
-    NTSTATUS status;
-
-    params.instance = instance;
-    params.timespecTime = (const struct timespec *)timespecTime;
-    params.time = time;
-
-    status = UNIX_CALL(xrConvertTimespecTimeToTimeKHR, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrBeginSession, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrCreateAction(XrActionSet actionSet, const XrActionCreateInfo * createInfo, XrAction * action)
 {
     struct xrCreateAction_params params;
-    NTSTATUS status;
 
     params.actionSet = actionSet;
-    params.createInfo = (const XrActionCreateInfo *)createInfo;
+    params.createInfo = createInfo;
     params.action = action;
 
-    status = UNIX_CALL(xrCreateAction, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrCreateAction, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrCreateActionSet(XrInstance instance, const XrActionSetCreateInfo * createInfo, XrActionSet * actionSet)
 {
     struct xrCreateActionSet_params params;
-    NTSTATUS status;
 
     params.instance = instance;
-    params.createInfo = (const XrActionSetCreateInfo *)createInfo;
+    params.createInfo = createInfo;
     params.actionSet = actionSet;
 
-    status = UNIX_CALL(xrCreateActionSet, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrCreateActionSet, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrCreateActionSpace(XrSession session, const XrActionSpaceCreateInfo * createInfo, XrSpace * space)
 {
     struct xrCreateActionSpace_params params;
-    NTSTATUS status;
 
     params.session = session;
-    params.createInfo = (const XrActionSpaceCreateInfo *)createInfo;
+    params.createInfo = createInfo;
     params.space = space;
 
-    status = UNIX_CALL(xrCreateActionSpace, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrCreateActionSpace, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrCreateHandTrackerEXT(XrSession session, const XrHandTrackerCreateInfoEXT * createInfo, XrHandTrackerEXT * handTracker)
 {
     struct xrCreateHandTrackerEXT_params params;
-    NTSTATUS status;
 
     params.session = session;
-    params.createInfo = (const XrHandTrackerCreateInfoEXT *)createInfo;
+    params.createInfo = createInfo;
     params.handTracker = handTracker;
 
-    status = UNIX_CALL(xrCreateHandTrackerEXT, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrCreateHandTrackerEXT, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrCreateReferenceSpace(XrSession session, const XrReferenceSpaceCreateInfo * createInfo, XrSpace * space)
 {
     struct xrCreateReferenceSpace_params params;
-    NTSTATUS status;
 
     params.session = session;
-    params.createInfo = (const XrReferenceSpaceCreateInfo *)createInfo;
+    params.createInfo = createInfo;
     params.space = space;
 
-    status = UNIX_CALL(xrCreateReferenceSpace, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrCreateReferenceSpace, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrDestroyAction(XrAction action)
 {
     struct xrDestroyAction_params params;
-    NTSTATUS status;
 
     params.action = action;
 
-    status = UNIX_CALL(xrDestroyAction, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrDestroyAction, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrDestroyActionSet(XrActionSet actionSet)
 {
     struct xrDestroyActionSet_params params;
-    NTSTATUS status;
 
     params.actionSet = actionSet;
 
-    status = UNIX_CALL(xrDestroyActionSet, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrDestroyActionSet, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrDestroyHandTrackerEXT(XrHandTrackerEXT handTracker)
 {
     struct xrDestroyHandTrackerEXT_params params;
-    NTSTATUS status;
 
     params.handTracker = handTracker;
 
-    status = UNIX_CALL(xrDestroyHandTrackerEXT, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrDestroyHandTrackerEXT, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrDestroySpace(XrSpace space)
 {
     struct xrDestroySpace_params params;
-    NTSTATUS status;
 
     params.space = space;
 
-    status = UNIX_CALL(xrDestroySpace, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrDestroySpace, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrEndSession(XrSession session)
 {
     struct xrEndSession_params params;
-    NTSTATUS status;
 
     params.session = session;
 
-    status = UNIX_CALL(xrEndSession, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrEndSession, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrEnumerateBoundSourcesForAction(XrSession session, const XrBoundSourcesForActionEnumerateInfo * enumerateInfo, uint32_t sourceCapacityInput, uint32_t * sourceCountOutput, XrPath * sources)
 {
     struct xrEnumerateBoundSourcesForAction_params params;
-    NTSTATUS status;
 
     params.session = session;
-    params.enumerateInfo = (const XrBoundSourcesForActionEnumerateInfo *)enumerateInfo;
+    params.enumerateInfo = enumerateInfo;
     params.sourceCapacityInput = sourceCapacityInput;
     params.sourceCountOutput = sourceCountOutput;
     params.sources = sources;
 
-    status = UNIX_CALL(xrEnumerateBoundSourcesForAction, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrEnumerateBoundSourcesForAction, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrEnumerateDisplayRefreshRatesFB(XrSession session, uint32_t displayRefreshRateCapacityInput, uint32_t * displayRefreshRateCountOutput, float * displayRefreshRates)
 {
     struct xrEnumerateDisplayRefreshRatesFB_params params;
-    NTSTATUS status;
 
     params.session = session;
     params.displayRefreshRateCapacityInput = displayRefreshRateCapacityInput;
     params.displayRefreshRateCountOutput = displayRefreshRateCountOutput;
     params.displayRefreshRates = displayRefreshRates;
 
-    status = UNIX_CALL(xrEnumerateDisplayRefreshRatesFB, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrEnumerateDisplayRefreshRatesFB, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrEnumerateEnvironmentBlendModes(XrInstance instance, XrSystemId systemId, XrViewConfigurationType viewConfigurationType, uint32_t environmentBlendModeCapacityInput, uint32_t * environmentBlendModeCountOutput, XrEnvironmentBlendMode * environmentBlendModes)
 {
     struct xrEnumerateEnvironmentBlendModes_params params;
-    NTSTATUS status;
 
     params.instance = instance;
     params.systemId = systemId;
@@ -279,60 +216,52 @@ static XrResult WINAPI wine_xrEnumerateEnvironmentBlendModes(XrInstance instance
     params.environmentBlendModeCountOutput = environmentBlendModeCountOutput;
     params.environmentBlendModes = environmentBlendModes;
 
-    status = UNIX_CALL(xrEnumerateEnvironmentBlendModes, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrEnumerateEnvironmentBlendModes, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrEnumerateInstanceExtensionProperties(const char * layerName, uint32_t propertyCapacityInput, uint32_t * propertyCountOutput, XrExtensionProperties * properties)
 {
     struct xrEnumerateInstanceExtensionProperties_params params;
-    NTSTATUS status;
 
-    params.layerName = (const char *)layerName;
+    params.layerName = layerName;
     params.propertyCapacityInput = propertyCapacityInput;
     params.propertyCountOutput = propertyCountOutput;
     params.properties = properties;
 
-    status = UNIX_CALL(xrEnumerateInstanceExtensionProperties, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrEnumerateInstanceExtensionProperties, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrEnumerateReferenceSpaces(XrSession session, uint32_t spaceCapacityInput, uint32_t * spaceCountOutput, XrReferenceSpaceType * spaces)
 {
     struct xrEnumerateReferenceSpaces_params params;
-    NTSTATUS status;
 
     params.session = session;
     params.spaceCapacityInput = spaceCapacityInput;
     params.spaceCountOutput = spaceCountOutput;
     params.spaces = spaces;
 
-    status = UNIX_CALL(xrEnumerateReferenceSpaces, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrEnumerateReferenceSpaces, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrEnumerateSwapchainFormats(XrSession session, uint32_t formatCapacityInput, uint32_t * formatCountOutput, int64_t * formats)
 {
     struct xrEnumerateSwapchainFormats_params params;
-    NTSTATUS status;
 
     params.session = session;
     params.formatCapacityInput = formatCapacityInput;
     params.formatCountOutput = formatCountOutput;
     params.formats = formats;
 
-    status = UNIX_CALL(xrEnumerateSwapchainFormats, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrEnumerateSwapchainFormats, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrEnumerateViewConfigurationViews(XrInstance instance, XrSystemId systemId, XrViewConfigurationType viewConfigurationType, uint32_t viewCapacityInput, uint32_t * viewCountOutput, XrViewConfigurationView * views)
 {
     struct xrEnumerateViewConfigurationViews_params params;
-    NTSTATUS status;
 
     params.instance = instance;
     params.systemId = systemId;
@@ -341,15 +270,13 @@ static XrResult WINAPI wine_xrEnumerateViewConfigurationViews(XrInstance instanc
     params.viewCountOutput = viewCountOutput;
     params.views = views;
 
-    status = UNIX_CALL(xrEnumerateViewConfigurationViews, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrEnumerateViewConfigurationViews, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrEnumerateViewConfigurations(XrInstance instance, XrSystemId systemId, uint32_t viewConfigurationTypeCapacityInput, uint32_t * viewConfigurationTypeCountOutput, XrViewConfigurationType * viewConfigurationTypes)
 {
     struct xrEnumerateViewConfigurations_params params;
-    NTSTATUS status;
 
     params.instance = instance;
     params.systemId = systemId;
@@ -357,184 +284,158 @@ static XrResult WINAPI wine_xrEnumerateViewConfigurations(XrInstance instance, X
     params.viewConfigurationTypeCountOutput = viewConfigurationTypeCountOutput;
     params.viewConfigurationTypes = viewConfigurationTypes;
 
-    status = UNIX_CALL(xrEnumerateViewConfigurations, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrEnumerateViewConfigurations, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrGetActionStateBoolean(XrSession session, const XrActionStateGetInfo * getInfo, XrActionStateBoolean * state)
 {
     struct xrGetActionStateBoolean_params params;
-    NTSTATUS status;
 
     params.session = session;
-    params.getInfo = (const XrActionStateGetInfo *)getInfo;
+    params.getInfo = getInfo;
     params.state = state;
 
-    status = UNIX_CALL(xrGetActionStateBoolean, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrGetActionStateBoolean, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrGetActionStateFloat(XrSession session, const XrActionStateGetInfo * getInfo, XrActionStateFloat * state)
 {
     struct xrGetActionStateFloat_params params;
-    NTSTATUS status;
 
     params.session = session;
-    params.getInfo = (const XrActionStateGetInfo *)getInfo;
+    params.getInfo = getInfo;
     params.state = state;
 
-    status = UNIX_CALL(xrGetActionStateFloat, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrGetActionStateFloat, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrGetActionStatePose(XrSession session, const XrActionStateGetInfo * getInfo, XrActionStatePose * state)
 {
     struct xrGetActionStatePose_params params;
-    NTSTATUS status;
 
     params.session = session;
-    params.getInfo = (const XrActionStateGetInfo *)getInfo;
+    params.getInfo = getInfo;
     params.state = state;
 
-    status = UNIX_CALL(xrGetActionStatePose, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrGetActionStatePose, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrGetActionStateVector2f(XrSession session, const XrActionStateGetInfo * getInfo, XrActionStateVector2f * state)
 {
     struct xrGetActionStateVector2f_params params;
-    NTSTATUS status;
 
     params.session = session;
-    params.getInfo = (const XrActionStateGetInfo *)getInfo;
+    params.getInfo = getInfo;
     params.state = state;
 
-    status = UNIX_CALL(xrGetActionStateVector2f, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrGetActionStateVector2f, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrGetCurrentInteractionProfile(XrSession session, XrPath topLevelUserPath, XrInteractionProfileState * interactionProfile)
 {
     struct xrGetCurrentInteractionProfile_params params;
-    NTSTATUS status;
 
     params.session = session;
     params.topLevelUserPath = topLevelUserPath;
     params.interactionProfile = interactionProfile;
 
-    status = UNIX_CALL(xrGetCurrentInteractionProfile, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrGetCurrentInteractionProfile, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrGetDisplayRefreshRateFB(XrSession session, float * displayRefreshRate)
 {
     struct xrGetDisplayRefreshRateFB_params params;
-    NTSTATUS status;
 
     params.session = session;
     params.displayRefreshRate = displayRefreshRate;
 
-    status = UNIX_CALL(xrGetDisplayRefreshRateFB, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrGetDisplayRefreshRateFB, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrGetInputSourceLocalizedName(XrSession session, const XrInputSourceLocalizedNameGetInfo * getInfo, uint32_t bufferCapacityInput, uint32_t * bufferCountOutput, char * buffer)
 {
     struct xrGetInputSourceLocalizedName_params params;
-    NTSTATUS status;
 
     params.session = session;
-    params.getInfo = (const XrInputSourceLocalizedNameGetInfo *)getInfo;
+    params.getInfo = getInfo;
     params.bufferCapacityInput = bufferCapacityInput;
     params.bufferCountOutput = bufferCountOutput;
     params.buffer = buffer;
 
-    status = UNIX_CALL(xrGetInputSourceLocalizedName, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrGetInputSourceLocalizedName, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrGetInstanceProperties(XrInstance instance, XrInstanceProperties * instanceProperties)
 {
     struct xrGetInstanceProperties_params params;
-    NTSTATUS status;
 
     params.instance = instance;
     params.instanceProperties = instanceProperties;
 
-    status = UNIX_CALL(xrGetInstanceProperties, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrGetInstanceProperties, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrGetReferenceSpaceBoundsRect(XrSession session, XrReferenceSpaceType referenceSpaceType, XrExtent2Df * bounds)
 {
     struct xrGetReferenceSpaceBoundsRect_params params;
-    NTSTATUS status;
 
     params.session = session;
     params.referenceSpaceType = referenceSpaceType;
     params.bounds = bounds;
 
-    status = UNIX_CALL(xrGetReferenceSpaceBoundsRect, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrGetReferenceSpaceBoundsRect, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrGetSystem(XrInstance instance, const XrSystemGetInfo * getInfo, XrSystemId * systemId)
 {
     struct xrGetSystem_params params;
-    NTSTATUS status;
 
     params.instance = instance;
-    params.getInfo = (const XrSystemGetInfo *)getInfo;
+    params.getInfo = getInfo;
     params.systemId = systemId;
 
-    status = UNIX_CALL(xrGetSystem, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrGetSystem, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrGetSystemProperties(XrInstance instance, XrSystemId systemId, XrSystemProperties * properties)
 {
     struct xrGetSystemProperties_params params;
-    NTSTATUS status;
 
     params.instance = instance;
     params.systemId = systemId;
     params.properties = properties;
 
-    status = UNIX_CALL(xrGetSystemProperties, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrGetSystemProperties, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrGetViewConfigurationProperties(XrInstance instance, XrSystemId systemId, XrViewConfigurationType viewConfigurationType, XrViewConfigurationProperties * configurationProperties)
 {
     struct xrGetViewConfigurationProperties_params params;
-    NTSTATUS status;
 
     params.instance = instance;
     params.systemId = systemId;
     params.viewConfigurationType = viewConfigurationType;
     params.configurationProperties = configurationProperties;
 
-    status = UNIX_CALL(xrGetViewConfigurationProperties, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrGetViewConfigurationProperties, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrGetVisibilityMaskKHR(XrSession session, XrViewConfigurationType viewConfigurationType, uint32_t viewIndex, XrVisibilityMaskTypeKHR visibilityMaskType, XrVisibilityMaskKHR * visibilityMask)
 {
     struct xrGetVisibilityMaskKHR_params params;
-    NTSTATUS status;
 
     params.session = session;
     params.viewConfigurationType = viewConfigurationType;
@@ -542,89 +443,77 @@ static XrResult WINAPI wine_xrGetVisibilityMaskKHR(XrSession session, XrViewConf
     params.visibilityMaskType = visibilityMaskType;
     params.visibilityMask = visibilityMask;
 
-    status = UNIX_CALL(xrGetVisibilityMaskKHR, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrGetVisibilityMaskKHR, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrLocateHandJointsEXT(XrHandTrackerEXT handTracker, const XrHandJointsLocateInfoEXT * locateInfo, XrHandJointLocationsEXT * locations)
 {
     struct xrLocateHandJointsEXT_params params;
-    NTSTATUS status;
 
     params.handTracker = handTracker;
-    params.locateInfo = (const XrHandJointsLocateInfoEXT *)locateInfo;
+    params.locateInfo = locateInfo;
     params.locations = locations;
 
-    status = UNIX_CALL(xrLocateHandJointsEXT, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrLocateHandJointsEXT, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrLocateSpace(XrSpace space, XrSpace baseSpace, XrTime time, XrSpaceLocation * location)
 {
     struct xrLocateSpace_params params;
-    NTSTATUS status;
 
     params.space = space;
     params.baseSpace = baseSpace;
     params.time = time;
     params.location = location;
 
-    status = UNIX_CALL(xrLocateSpace, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrLocateSpace, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrLocateSpaces(XrSession session, const XrSpacesLocateInfo * locateInfo, XrSpaceLocations * spaceLocations)
 {
     struct xrLocateSpaces_params params;
-    NTSTATUS status;
 
     params.session = session;
-    params.locateInfo = (const XrSpacesLocateInfo *)locateInfo;
+    params.locateInfo = locateInfo;
     params.spaceLocations = spaceLocations;
 
-    status = UNIX_CALL(xrLocateSpaces, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrLocateSpaces, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrLocateSpacesKHR(XrSession session, const XrSpacesLocateInfo * locateInfo, XrSpaceLocations * spaceLocations)
 {
     struct xrLocateSpacesKHR_params params;
-    NTSTATUS status;
 
     params.session = session;
-    params.locateInfo = (const XrSpacesLocateInfo *)locateInfo;
+    params.locateInfo = locateInfo;
     params.spaceLocations = spaceLocations;
 
-    status = UNIX_CALL(xrLocateSpacesKHR, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrLocateSpacesKHR, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrLocateViews(XrSession session, const XrViewLocateInfo * viewLocateInfo, XrViewState * viewState, uint32_t viewCapacityInput, uint32_t * viewCountOutput, XrView * views)
 {
     struct xrLocateViews_params params;
-    NTSTATUS status;
 
     params.session = session;
-    params.viewLocateInfo = (const XrViewLocateInfo *)viewLocateInfo;
+    params.viewLocateInfo = viewLocateInfo;
     params.viewState = viewState;
     params.viewCapacityInput = viewCapacityInput;
     params.viewCountOutput = viewCountOutput;
     params.views = views;
 
-    status = UNIX_CALL(xrLocateViews, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrLocateViews, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrPathToString(XrInstance instance, XrPath path, uint32_t bufferCapacityInput, uint32_t * bufferCountOutput, char * buffer)
 {
     struct xrPathToString_params params;
-    NTSTATUS status;
 
     params.instance = instance;
     params.path = path;
@@ -632,155 +521,132 @@ static XrResult WINAPI wine_xrPathToString(XrInstance instance, XrPath path, uin
     params.bufferCountOutput = bufferCountOutput;
     params.buffer = buffer;
 
-    status = UNIX_CALL(xrPathToString, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrPathToString, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrRequestDisplayRefreshRateFB(XrSession session, float displayRefreshRate)
 {
     struct xrRequestDisplayRefreshRateFB_params params;
-    NTSTATUS status;
 
     params.session = session;
     params.displayRefreshRate = displayRefreshRate;
 
-    status = UNIX_CALL(xrRequestDisplayRefreshRateFB, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrRequestDisplayRefreshRateFB, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrRequestExitSession(XrSession session)
 {
     struct xrRequestExitSession_params params;
-    NTSTATUS status;
 
     params.session = session;
 
-    status = UNIX_CALL(xrRequestExitSession, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrRequestExitSession, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrResultToString(XrInstance instance, XrResult value, char * buffer)
 {
     struct xrResultToString_params params;
-    NTSTATUS status;
 
     params.instance = instance;
     params.value = value;
     params.buffer = buffer;
 
-    status = UNIX_CALL(xrResultToString, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrResultToString, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrStopHapticFeedback(XrSession session, const XrHapticActionInfo * hapticActionInfo)
 {
     struct xrStopHapticFeedback_params params;
-    NTSTATUS status;
 
     params.session = session;
-    params.hapticActionInfo = (const XrHapticActionInfo *)hapticActionInfo;
+    params.hapticActionInfo = hapticActionInfo;
 
-    status = UNIX_CALL(xrStopHapticFeedback, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrStopHapticFeedback, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrStringToPath(XrInstance instance, const char * pathString, XrPath * path)
 {
     struct xrStringToPath_params params;
-    NTSTATUS status;
 
     params.instance = instance;
-    params.pathString = (const char *)pathString;
+    params.pathString = pathString;
     params.path = path;
 
-    status = UNIX_CALL(xrStringToPath, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrStringToPath, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrStructureTypeToString(XrInstance instance, XrStructureType value, char * buffer)
 {
     struct xrStructureTypeToString_params params;
-    NTSTATUS status;
 
     params.instance = instance;
     params.value = value;
     params.buffer = buffer;
 
-    status = UNIX_CALL(xrStructureTypeToString, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrStructureTypeToString, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrStructureTypeToString2KHR(XrInstance instance, XrStructureType value, char * buffer)
 {
     struct xrStructureTypeToString2KHR_params params;
-    NTSTATUS status;
 
     params.instance = instance;
     params.value = value;
     params.buffer = buffer;
 
-    status = UNIX_CALL(xrStructureTypeToString2KHR, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrStructureTypeToString2KHR, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrSuggestInteractionProfileBindings(XrInstance instance, const XrInteractionProfileSuggestedBinding * suggestedBindings)
 {
     struct xrSuggestInteractionProfileBindings_params params;
-    NTSTATUS status;
 
     params.instance = instance;
-    params.suggestedBindings = (const XrInteractionProfileSuggestedBinding *)suggestedBindings;
+    params.suggestedBindings = suggestedBindings;
 
-    status = UNIX_CALL(xrSuggestInteractionProfileBindings, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrSuggestInteractionProfileBindings, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrSyncActions(XrSession session, const XrActionsSyncInfo * syncInfo)
 {
     struct xrSyncActions_params params;
-    NTSTATUS status;
 
     params.session = session;
-    params.syncInfo = (const XrActionsSyncInfo *)syncInfo;
+    params.syncInfo = syncInfo;
 
-    status = UNIX_CALL(xrSyncActions, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrSyncActions, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrWaitFrame(XrSession session, const XrFrameWaitInfo * frameWaitInfo, XrFrameState * frameState)
 {
     struct xrWaitFrame_params params;
-    NTSTATUS status;
 
     params.session = session;
-    params.frameWaitInfo = (const XrFrameWaitInfo *)frameWaitInfo;
+    params.frameWaitInfo = frameWaitInfo;
     params.frameState = frameState;
 
-    status = UNIX_CALL(xrWaitFrame, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrWaitFrame, &params);
     return params.result;
 }
 
 static XrResult WINAPI wine_xrWaitSwapchainImage(XrSwapchain swapchain, const XrSwapchainImageWaitInfo * waitInfo)
 {
     struct xrWaitSwapchainImage_params params;
-    NTSTATUS status;
 
     params.swapchain = swapchain;
-    params.waitInfo = (const XrSwapchainImageWaitInfo *)waitInfo;
+    params.waitInfo = waitInfo;
 
-    status = UNIX_CALL(xrWaitSwapchainImage, &params);
-    if (status) return XR_ERROR_RUNTIME_FAILURE;
+    UNIX_CALL(xrWaitSwapchainImage, &params);
     return params.result;
 }
 
@@ -788,99 +654,109 @@ XrResult WINAPI xrConvertTimeToWin32PerformanceCounterKHR(XrInstance instance, X
 XrResult WINAPI xrConvertWin32PerformanceCounterToTimeKHR(XrInstance instance, const LARGE_INTEGER * performanceCounter, XrTime * time);
 XrResult WINAPI xrGetD3D11GraphicsRequirementsKHR(XrInstance instance, XrSystemId systemId, XrGraphicsRequirementsD3D11KHR * graphicsRequirements);
 
-struct openxr_func
+static const struct openxr_function xr_function_table[] =
 {
-    const char *name;
-    void *func;
+    {"xrAcquireSwapchainImage", (void *)wine_xrAcquireSwapchainImage, -1, 0, 0},
+    {"xrApplyHapticFeedback", (void *)wine_xrApplyHapticFeedback, -1, 0, 0},
+    {"xrAttachSessionActionSets", (void *)wine_xrAttachSessionActionSets, -1, 0, 0},
+    {"xrBeginFrame", (void *)wine_xrBeginFrame, -1, 0, 0},
+    {"xrBeginSession", (void *)wine_xrBeginSession, -1, 0, 0},
+    {"xrConvertTimeToWin32PerformanceCounterKHR", (void *)xrConvertTimeToWin32PerformanceCounterKHR, 11, 0, 0},
+    {"xrConvertWin32PerformanceCounterToTimeKHR", (void *)xrConvertWin32PerformanceCounterToTimeKHR, 11, 0, 0},
+    {"xrCreateAction", (void *)wine_xrCreateAction, -1, 0, 0},
+    {"xrCreateActionSet", (void *)wine_xrCreateActionSet, -1, 0, 0},
+    {"xrCreateActionSpace", (void *)wine_xrCreateActionSpace, -1, 0, 0},
+    {"xrCreateHandTrackerEXT", (void *)wine_xrCreateHandTrackerEXT, 0, 0, 0},
+    {"xrCreateInstance", (void *)xrCreateInstance, -1, 0, 1},
+    {"xrCreateReferenceSpace", (void *)wine_xrCreateReferenceSpace, -1, 0, 0},
+    {"xrCreateSession", (void *)xrCreateSession, -1, 0, 0},
+    {"xrCreateSwapchain", (void *)xrCreateSwapchain, -1, 0, 0},
+    {"xrDestroyAction", (void *)wine_xrDestroyAction, -1, 0, 0},
+    {"xrDestroyActionSet", (void *)wine_xrDestroyActionSet, -1, 0, 0},
+    {"xrDestroyHandTrackerEXT", (void *)wine_xrDestroyHandTrackerEXT, 0, 0, 0},
+    {"xrDestroyInstance", (void *)xrDestroyInstance, -1, 0, 0},
+    {"xrDestroySession", (void *)xrDestroySession, -1, 0, 0},
+    {"xrDestroySpace", (void *)wine_xrDestroySpace, -1, 0, 0},
+    {"xrDestroySwapchain", (void *)xrDestroySwapchain, -1, 0, 0},
+    {"xrEndFrame", (void *)xrEndFrame, -1, 0, 0},
+    {"xrEndSession", (void *)wine_xrEndSession, -1, 0, 0},
+    {"xrEnumerateApiLayerProperties", (void *)xrEnumerateApiLayerProperties, -1, 0, 1},
+    {"xrEnumerateBoundSourcesForAction", (void *)wine_xrEnumerateBoundSourcesForAction, -1, 0, 0},
+    {"xrEnumerateDisplayRefreshRatesFB", (void *)wine_xrEnumerateDisplayRefreshRatesFB, 1, 0, 0},
+    {"xrEnumerateEnvironmentBlendModes", (void *)wine_xrEnumerateEnvironmentBlendModes, -1, 0, 0},
+    {"xrEnumerateInstanceExtensionProperties", (void *)wine_xrEnumerateInstanceExtensionProperties, -1, 0, 1},
+    {"xrEnumerateReferenceSpaces", (void *)wine_xrEnumerateReferenceSpaces, -1, 0, 0},
+    {"xrEnumerateSwapchainFormats", (void *)wine_xrEnumerateSwapchainFormats, -1, 0, 0},
+    {"xrEnumerateSwapchainImages", (void *)xrEnumerateSwapchainImages, -1, 0, 0},
+    {"xrEnumerateViewConfigurationViews", (void *)wine_xrEnumerateViewConfigurationViews, -1, 0, 0},
+    {"xrEnumerateViewConfigurations", (void *)wine_xrEnumerateViewConfigurations, -1, 0, 0},
+    {"xrGetActionStateBoolean", (void *)wine_xrGetActionStateBoolean, -1, 0, 0},
+    {"xrGetActionStateFloat", (void *)wine_xrGetActionStateFloat, -1, 0, 0},
+    {"xrGetActionStatePose", (void *)wine_xrGetActionStatePose, -1, 0, 0},
+    {"xrGetActionStateVector2f", (void *)wine_xrGetActionStateVector2f, -1, 0, 0},
+    {"xrGetCurrentInteractionProfile", (void *)wine_xrGetCurrentInteractionProfile, -1, 0, 0},
+    {"xrGetD3D11GraphicsRequirementsKHR", (void *)xrGetD3D11GraphicsRequirementsKHR, 2, 0, 0},
+    {"xrGetDisplayRefreshRateFB", (void *)wine_xrGetDisplayRefreshRateFB, 1, 0, 0},
+    {"xrGetInputSourceLocalizedName", (void *)wine_xrGetInputSourceLocalizedName, -1, 0, 0},
+    {"xrGetInstanceProcAddr", (void *)xrGetInstanceProcAddr, -1, 0, 0},
+    {"xrGetInstanceProperties", (void *)wine_xrGetInstanceProperties, -1, 0, 0},
+    {"xrGetReferenceSpaceBoundsRect", (void *)wine_xrGetReferenceSpaceBoundsRect, -1, 0, 0},
+    {"xrGetSystem", (void *)wine_xrGetSystem, -1, 0, 0},
+    {"xrGetSystemProperties", (void *)wine_xrGetSystemProperties, -1, 0, 0},
+    {"xrGetViewConfigurationProperties", (void *)wine_xrGetViewConfigurationProperties, -1, 0, 0},
+    {"xrGetVisibilityMaskKHR", (void *)wine_xrGetVisibilityMaskKHR, 10, 0, 0},
+    {"xrLocateHandJointsEXT", (void *)wine_xrLocateHandJointsEXT, 0, 0, 0},
+    {"xrLocateSpace", (void *)wine_xrLocateSpace, -1, 0, 0},
+    {"xrLocateSpaces", (void *)wine_xrLocateSpaces, -1, 1, 0},
+    {"xrLocateSpacesKHR", (void *)wine_xrLocateSpacesKHR, 9, 0, 0},
+    {"xrLocateViews", (void *)wine_xrLocateViews, -1, 0, 0},
+    {"xrPathToString", (void *)wine_xrPathToString, -1, 0, 0},
+    {"xrPollEvent", (void *)xrPollEvent, -1, 0, 0},
+    {"xrReleaseSwapchainImage", (void *)xrReleaseSwapchainImage, -1, 0, 0},
+    {"xrRequestDisplayRefreshRateFB", (void *)wine_xrRequestDisplayRefreshRateFB, 1, 0, 0},
+    {"xrRequestExitSession", (void *)wine_xrRequestExitSession, -1, 0, 0},
+    {"xrResultToString", (void *)wine_xrResultToString, -1, 0, 0},
+    {"xrStopHapticFeedback", (void *)wine_xrStopHapticFeedback, -1, 0, 0},
+    {"xrStringToPath", (void *)wine_xrStringToPath, -1, 0, 0},
+    {"xrStructureTypeToString", (void *)wine_xrStructureTypeToString, -1, 0, 0},
+    {"xrStructureTypeToString2KHR", (void *)wine_xrStructureTypeToString2KHR, 8, 0, 0},
+    {"xrSuggestInteractionProfileBindings", (void *)wine_xrSuggestInteractionProfileBindings, -1, 0, 0},
+    {"xrSyncActions", (void *)wine_xrSyncActions, -1, 0, 0},
+    {"xrWaitFrame", (void *)wine_xrWaitFrame, -1, 0, 0},
+    {"xrWaitSwapchainImage", (void *)wine_xrWaitSwapchainImage, -1, 0, 0},
 };
 
-static const struct openxr_func xr_instance_dispatch_table[] =
+const struct openxr_function *wine_xr_find_function(const char *name)
 {
-    {"xrAcquireSwapchainImage", wine_xrAcquireSwapchainImage},
-    {"xrApplyHapticFeedback", wine_xrApplyHapticFeedback},
-    {"xrAttachSessionActionSets", wine_xrAttachSessionActionSets},
-    {"xrBeginFrame", wine_xrBeginFrame},
-    {"xrBeginSession", wine_xrBeginSession},
-    {"xrConvertTimeToTimespecTimeKHR", wine_xrConvertTimeToTimespecTimeKHR},
-    {"xrConvertTimeToWin32PerformanceCounterKHR", (void *)xrConvertTimeToWin32PerformanceCounterKHR},
-    {"xrConvertTimespecTimeToTimeKHR", wine_xrConvertTimespecTimeToTimeKHR},
-    {"xrConvertWin32PerformanceCounterToTimeKHR", (void *)xrConvertWin32PerformanceCounterToTimeKHR},
-    {"xrCreateAction", wine_xrCreateAction},
-    {"xrCreateActionSet", wine_xrCreateActionSet},
-    {"xrCreateActionSpace", wine_xrCreateActionSpace},
-    {"xrCreateHandTrackerEXT", wine_xrCreateHandTrackerEXT},
-    {"xrCreateInstance", (void *)xrCreateInstance},
-    {"xrCreateReferenceSpace", wine_xrCreateReferenceSpace},
-    {"xrCreateSession", (void *)xrCreateSession},
-    {"xrCreateSwapchain", (void *)xrCreateSwapchain},
-    {"xrDestroyAction", wine_xrDestroyAction},
-    {"xrDestroyActionSet", wine_xrDestroyActionSet},
-    {"xrDestroyHandTrackerEXT", wine_xrDestroyHandTrackerEXT},
-    {"xrDestroyInstance", (void *)xrDestroyInstance},
-    {"xrDestroySession", (void *)xrDestroySession},
-    {"xrDestroySpace", wine_xrDestroySpace},
-    {"xrDestroySwapchain", (void *)xrDestroySwapchain},
-    {"xrEndFrame", (void *)xrEndFrame},
-    {"xrEndSession", wine_xrEndSession},
-    {"xrEnumerateBoundSourcesForAction", wine_xrEnumerateBoundSourcesForAction},
-    {"xrEnumerateDisplayRefreshRatesFB", wine_xrEnumerateDisplayRefreshRatesFB},
-    {"xrEnumerateEnvironmentBlendModes", wine_xrEnumerateEnvironmentBlendModes},
-    {"xrEnumerateInstanceExtensionProperties", wine_xrEnumerateInstanceExtensionProperties},
-    {"xrEnumerateReferenceSpaces", wine_xrEnumerateReferenceSpaces},
-    {"xrEnumerateSwapchainFormats", wine_xrEnumerateSwapchainFormats},
-    {"xrEnumerateSwapchainImages", (void *)xrEnumerateSwapchainImages},
-    {"xrEnumerateViewConfigurationViews", wine_xrEnumerateViewConfigurationViews},
-    {"xrEnumerateViewConfigurations", wine_xrEnumerateViewConfigurations},
-    {"xrGetActionStateBoolean", wine_xrGetActionStateBoolean},
-    {"xrGetActionStateFloat", wine_xrGetActionStateFloat},
-    {"xrGetActionStatePose", wine_xrGetActionStatePose},
-    {"xrGetActionStateVector2f", wine_xrGetActionStateVector2f},
-    {"xrGetCurrentInteractionProfile", wine_xrGetCurrentInteractionProfile},
-    {"xrGetD3D11GraphicsRequirementsKHR", (void *)xrGetD3D11GraphicsRequirementsKHR},
-    {"xrGetDisplayRefreshRateFB", wine_xrGetDisplayRefreshRateFB},
-    {"xrGetInputSourceLocalizedName", wine_xrGetInputSourceLocalizedName},
-    {"xrGetInstanceProcAddr", (void *)xrGetInstanceProcAddr},
-    {"xrGetInstanceProperties", wine_xrGetInstanceProperties},
-    {"xrGetReferenceSpaceBoundsRect", wine_xrGetReferenceSpaceBoundsRect},
-    {"xrGetSystem", wine_xrGetSystem},
-    {"xrGetSystemProperties", wine_xrGetSystemProperties},
-    {"xrGetViewConfigurationProperties", wine_xrGetViewConfigurationProperties},
-    {"xrGetVisibilityMaskKHR", wine_xrGetVisibilityMaskKHR},
-    {"xrLocateHandJointsEXT", wine_xrLocateHandJointsEXT},
-    {"xrLocateSpace", wine_xrLocateSpace},
-    {"xrLocateSpaces", wine_xrLocateSpaces},
-    {"xrLocateSpacesKHR", wine_xrLocateSpacesKHR},
-    {"xrLocateViews", wine_xrLocateViews},
-    {"xrPathToString", wine_xrPathToString},
-    {"xrPollEvent", (void *)xrPollEvent},
-    {"xrReleaseSwapchainImage", (void *)xrReleaseSwapchainImage},
-    {"xrRequestDisplayRefreshRateFB", wine_xrRequestDisplayRefreshRateFB},
-    {"xrRequestExitSession", wine_xrRequestExitSession},
-    {"xrResultToString", wine_xrResultToString},
-    {"xrStopHapticFeedback", wine_xrStopHapticFeedback},
-    {"xrStringToPath", wine_xrStringToPath},
-    {"xrStructureTypeToString", wine_xrStructureTypeToString},
-    {"xrStructureTypeToString2KHR", wine_xrStructureTypeToString2KHR},
-    {"xrSuggestInteractionProfileBindings", wine_xrSuggestInteractionProfileBindings},
-    {"xrSyncActions", wine_xrSyncActions},
-    {"xrWaitFrame", wine_xrWaitFrame},
-    {"xrWaitSwapchainImage", wine_xrWaitSwapchainImage},
-};
-
-void *wine_xr_get_instance_proc_addr(const char *name)
-{
-    unsigned int lo = 0, hi = sizeof(xr_instance_dispatch_table) / sizeof(xr_instance_dispatch_table[0]);
-    while (lo < hi)
+    unsigned int low = 0, high = sizeof(xr_function_table) / sizeof(xr_function_table[0]);
+    while (low < high)
     {
-        unsigned int mid = (lo + hi) / 2;
-        int cmp = strcmp(xr_instance_dispatch_table[mid].name, name);
-        if (cmp == 0)
-            return xr_instance_dispatch_table[mid].func;
-        if (cmp < 0)
-            lo = mid + 1;
+        unsigned int middle = (low + high) / 2;
+        int comparison = strcmp(xr_function_table[middle].name, name);
+        if (comparison == 0)
+            return &xr_function_table[middle];
+        if (comparison < 0)
+            low = middle + 1;
         else
-            hi = mid;
+            high = middle;
     }
     return NULL;
+}
+
+int wine_xr_extension_index(const char *name)
+{
+    unsigned int low = 0, high = sizeof(xr_bridge_extensions) / sizeof(xr_bridge_extensions[0]);
+    while (low < high)
+    {
+        unsigned int middle = (low + high) / 2;
+        int comparison = strcmp(xr_bridge_extensions[middle], name);
+        if (comparison == 0)
+            return (int)middle;
+        if (comparison < 0)
+            low = middle + 1;
+        else
+            high = middle;
+    }
+    return -1;
 }
 

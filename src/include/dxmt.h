@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#ifndef __WINE_OPENXR_DXMT_INTEROP_H
-#define __WINE_OPENXR_DXMT_INTEROP_H
+#ifndef __WINE_OPENXR_DXMT_H
+#define __WINE_OPENXR_DXMT_H
 
 #include <unknwn.h>
 #include <d3d11_4.h>
@@ -31,4 +31,4 @@ DECLARE_INTERFACE_(IMTLD3D11InteropDevice, IUnknown)
 
 _Static_assert(sizeof(IMTLD3D11InteropDeviceVtbl) == 5 * sizeof(void*), "vtable mismatch");
 
-#endif /* __WINE_OPENXR_DXMT_INTEROP_H */
+#endif /* __WINE_OPENXR_DXMT_H */

@@ -2,8 +2,8 @@ cmake_minimum_required(VERSION 3.20)
 project(wineopenxr_pe C)
 
 add_library(wineopenxr SHARED
-    openxr_loader.c
-    loader_thunks.c
+    openxr.c
+    thunks.c
     "${WINEOPENXR_DEF}"
 )
 

@@ -3,6 +3,9 @@
 #define XR_USE_GRAPHICS_API_METAL
 #define XR_USE_GRAPHICS_API_D3D11
 #define XR_USE_PLATFORM_WIN32
+#define XR_USE_TIMESPEC
+
+#include <time.h>
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
@@ -11,15 +14,14 @@
 #include "winternl.h"
 #include "wine/unixlib.h"
 
-#include "openxr_loader.h"
+#include "bridge.h"
 #include "openxr/openxr_platform.h"
-#include "loader_thunks.h"
-#include "openxr_thunks.h"
+#include "unixcall.h"
+#include "dispatch.h"
 
 extern struct openxr_instance_funcs g_xr_host_instance_dispatch_table;
 
 extern NTSTATUS wine_init(void *args);
-extern NTSTATUS wine_is_available_instance_function(void *args);
 extern NTSTATUS wine_create_d3d11_session(void *args);
 extern NTSTATUS wine_release_metal_session(void *args);
 extern NTSTATUS wine_export_metal_textures(void *args);
@@ -37,931 +39,749 @@ extern NTSTATUS wine_xrGetD3D11GraphicsRequirementsKHR(void *args);
 static NTSTATUS thunk_xrAcquireSwapchainImage(void *args)
 {
     struct xrAcquireSwapchainImage_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrAcquireSwapchainImage)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrAcquireSwapchainImage(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrAcquireSwapchainImage(
         wine_swapchain_from_handle(params->swapchain)->host_swapchain,
         params->acquireInfo,
         params->index);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrApplyHapticFeedback(void *args)
 {
     struct xrApplyHapticFeedback_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrApplyHapticFeedback)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrApplyHapticFeedback(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrApplyHapticFeedback(
         wine_session_from_handle(params->session)->host_session,
         params->hapticActionInfo,
         params->hapticFeedback);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrAttachSessionActionSets(void *args)
 {
     struct xrAttachSessionActionSets_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrAttachSessionActionSets)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrAttachSessionActionSets(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrAttachSessionActionSets(
         wine_session_from_handle(params->session)->host_session,
         params->attachInfo);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrBeginFrame(void *args)
 {
     struct xrBeginFrame_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrBeginFrame)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrBeginFrame(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrBeginFrame(
         wine_session_from_handle(params->session)->host_session,
         params->frameBeginInfo);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrBeginSession(void *args)
 {
     struct xrBeginSession_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrBeginSession)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrBeginSession(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrBeginSession(
         wine_session_from_handle(params->session)->host_session,
         params->beginInfo);
-    return STATUS_SUCCESS;
-}
 
-static NTSTATUS thunk_xrConvertTimeToTimespecTimeKHR(void *args)
-{
-    struct xrConvertTimeToTimespecTimeKHR_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrConvertTimeToTimespecTimeKHR)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrConvertTimeToTimespecTimeKHR(
-        wine_instance_from_handle(params->instance)->host_instance,
-        params->time,
-        params->timespecTime);
-    return STATUS_SUCCESS;
-}
-
-static NTSTATUS thunk_xrConvertTimespecTimeToTimeKHR(void *args)
-{
-    struct xrConvertTimespecTimeToTimeKHR_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrConvertTimespecTimeToTimeKHR)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrConvertTimespecTimeToTimeKHR(
-        wine_instance_from_handle(params->instance)->host_instance,
-        params->timespecTime,
-        params->time);
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrCreateAction(void *args)
 {
     struct xrCreateAction_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrCreateAction)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrCreateAction(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrCreateAction(
         params->actionSet,
         params->createInfo,
         params->action);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrCreateActionSet(void *args)
 {
     struct xrCreateActionSet_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrCreateActionSet)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrCreateActionSet(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrCreateActionSet(
         wine_instance_from_handle(params->instance)->host_instance,
         params->createInfo,
         params->actionSet);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrCreateActionSpace(void *args)
 {
     struct xrCreateActionSpace_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrCreateActionSpace)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrCreateActionSpace(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrCreateActionSpace(
         wine_session_from_handle(params->session)->host_session,
         params->createInfo,
         params->space);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrCreateHandTrackerEXT(void *args)
 {
     struct xrCreateHandTrackerEXT_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrCreateHandTrackerEXT)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrCreateHandTrackerEXT(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrCreateHandTrackerEXT(
         wine_session_from_handle(params->session)->host_session,
         params->createInfo,
         params->handTracker);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrCreateReferenceSpace(void *args)
 {
     struct xrCreateReferenceSpace_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrCreateReferenceSpace)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrCreateReferenceSpace(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrCreateReferenceSpace(
         wine_session_from_handle(params->session)->host_session,
         params->createInfo,
         params->space);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrDestroyAction(void *args)
 {
     struct xrDestroyAction_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrDestroyAction)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrDestroyAction(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrDestroyAction(
         params->action);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrDestroyActionSet(void *args)
 {
     struct xrDestroyActionSet_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrDestroyActionSet)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrDestroyActionSet(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrDestroyActionSet(
         params->actionSet);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrDestroyHandTrackerEXT(void *args)
 {
     struct xrDestroyHandTrackerEXT_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrDestroyHandTrackerEXT)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrDestroyHandTrackerEXT(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrDestroyHandTrackerEXT(
         params->handTracker);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrDestroySession(void *args)
 {
     struct xrDestroySession_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrDestroySession)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrDestroySession(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrDestroySession(
         wine_session_from_handle(params->session)->host_session);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrDestroySpace(void *args)
 {
     struct xrDestroySpace_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrDestroySpace)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrDestroySpace(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrDestroySpace(
         params->space);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrDestroySwapchain(void *args)
 {
     struct xrDestroySwapchain_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrDestroySwapchain)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrDestroySwapchain(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrDestroySwapchain(
         wine_swapchain_from_handle(params->swapchain)->host_swapchain);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrEndSession(void *args)
 {
     struct xrEndSession_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrEndSession)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrEndSession(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrEndSession(
         wine_session_from_handle(params->session)->host_session);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrEnumerateBoundSourcesForAction(void *args)
 {
     struct xrEnumerateBoundSourcesForAction_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrEnumerateBoundSourcesForAction)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrEnumerateBoundSourcesForAction(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrEnumerateBoundSourcesForAction(
         wine_session_from_handle(params->session)->host_session,
         params->enumerateInfo,
         params->sourceCapacityInput,
         params->sourceCountOutput,
         params->sources);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrEnumerateDisplayRefreshRatesFB(void *args)
 {
     struct xrEnumerateDisplayRefreshRatesFB_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrEnumerateDisplayRefreshRatesFB)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrEnumerateDisplayRefreshRatesFB(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrEnumerateDisplayRefreshRatesFB(
         wine_session_from_handle(params->session)->host_session,
         params->displayRefreshRateCapacityInput,
         params->displayRefreshRateCountOutput,
         params->displayRefreshRates);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrEnumerateEnvironmentBlendModes(void *args)
 {
     struct xrEnumerateEnvironmentBlendModes_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrEnumerateEnvironmentBlendModes)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrEnumerateEnvironmentBlendModes(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrEnumerateEnvironmentBlendModes(
         wine_instance_from_handle(params->instance)->host_instance,
         params->systemId,
         params->viewConfigurationType,
         params->environmentBlendModeCapacityInput,
         params->environmentBlendModeCountOutput,
         params->environmentBlendModes);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrEnumerateReferenceSpaces(void *args)
 {
     struct xrEnumerateReferenceSpaces_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrEnumerateReferenceSpaces)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrEnumerateReferenceSpaces(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrEnumerateReferenceSpaces(
         wine_session_from_handle(params->session)->host_session,
         params->spaceCapacityInput,
         params->spaceCountOutput,
         params->spaces);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrEnumerateSwapchainImages(void *args)
 {
     struct xrEnumerateSwapchainImages_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrEnumerateSwapchainImages)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrEnumerateSwapchainImages(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrEnumerateSwapchainImages(
         wine_swapchain_from_handle(params->swapchain)->host_swapchain,
         params->imageCapacityInput,
         params->imageCountOutput,
         params->images);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrEnumerateViewConfigurationViews(void *args)
 {
     struct xrEnumerateViewConfigurationViews_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrEnumerateViewConfigurationViews)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrEnumerateViewConfigurationViews(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrEnumerateViewConfigurationViews(
         wine_instance_from_handle(params->instance)->host_instance,
         params->systemId,
         params->viewConfigurationType,
         params->viewCapacityInput,
         params->viewCountOutput,
         params->views);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrEnumerateViewConfigurations(void *args)
 {
     struct xrEnumerateViewConfigurations_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrEnumerateViewConfigurations)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrEnumerateViewConfigurations(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrEnumerateViewConfigurations(
         wine_instance_from_handle(params->instance)->host_instance,
         params->systemId,
         params->viewConfigurationTypeCapacityInput,
         params->viewConfigurationTypeCountOutput,
         params->viewConfigurationTypes);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrGetActionStateBoolean(void *args)
 {
     struct xrGetActionStateBoolean_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrGetActionStateBoolean)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrGetActionStateBoolean(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrGetActionStateBoolean(
         wine_session_from_handle(params->session)->host_session,
         params->getInfo,
         params->state);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrGetActionStateFloat(void *args)
 {
     struct xrGetActionStateFloat_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrGetActionStateFloat)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrGetActionStateFloat(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrGetActionStateFloat(
         wine_session_from_handle(params->session)->host_session,
         params->getInfo,
         params->state);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrGetActionStatePose(void *args)
 {
     struct xrGetActionStatePose_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrGetActionStatePose)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrGetActionStatePose(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrGetActionStatePose(
         wine_session_from_handle(params->session)->host_session,
         params->getInfo,
         params->state);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrGetActionStateVector2f(void *args)
 {
     struct xrGetActionStateVector2f_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrGetActionStateVector2f)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrGetActionStateVector2f(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrGetActionStateVector2f(
         wine_session_from_handle(params->session)->host_session,
         params->getInfo,
         params->state);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrGetCurrentInteractionProfile(void *args)
 {
     struct xrGetCurrentInteractionProfile_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrGetCurrentInteractionProfile)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrGetCurrentInteractionProfile(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrGetCurrentInteractionProfile(
         wine_session_from_handle(params->session)->host_session,
         params->topLevelUserPath,
         params->interactionProfile);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrGetDisplayRefreshRateFB(void *args)
 {
     struct xrGetDisplayRefreshRateFB_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrGetDisplayRefreshRateFB)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrGetDisplayRefreshRateFB(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrGetDisplayRefreshRateFB(
         wine_session_from_handle(params->session)->host_session,
         params->displayRefreshRate);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrGetInputSourceLocalizedName(void *args)
 {
     struct xrGetInputSourceLocalizedName_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrGetInputSourceLocalizedName)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrGetInputSourceLocalizedName(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrGetInputSourceLocalizedName(
         wine_session_from_handle(params->session)->host_session,
         params->getInfo,
         params->bufferCapacityInput,
         params->bufferCountOutput,
         params->buffer);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrGetInstanceProperties(void *args)
 {
     struct xrGetInstanceProperties_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrGetInstanceProperties)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrGetInstanceProperties(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrGetInstanceProperties(
         wine_instance_from_handle(params->instance)->host_instance,
         params->instanceProperties);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrGetReferenceSpaceBoundsRect(void *args)
 {
     struct xrGetReferenceSpaceBoundsRect_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrGetReferenceSpaceBoundsRect)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrGetReferenceSpaceBoundsRect(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrGetReferenceSpaceBoundsRect(
         wine_session_from_handle(params->session)->host_session,
         params->referenceSpaceType,
         params->bounds);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrGetSystem(void *args)
 {
     struct xrGetSystem_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrGetSystem)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrGetSystem(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrGetSystem(
         wine_instance_from_handle(params->instance)->host_instance,
         params->getInfo,
         params->systemId);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrGetSystemProperties(void *args)
 {
     struct xrGetSystemProperties_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrGetSystemProperties)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrGetSystemProperties(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrGetSystemProperties(
         wine_instance_from_handle(params->instance)->host_instance,
         params->systemId,
         params->properties);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrGetViewConfigurationProperties(void *args)
 {
     struct xrGetViewConfigurationProperties_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrGetViewConfigurationProperties)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrGetViewConfigurationProperties(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrGetViewConfigurationProperties(
         wine_instance_from_handle(params->instance)->host_instance,
         params->systemId,
         params->viewConfigurationType,
         params->configurationProperties);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrGetVisibilityMaskKHR(void *args)
 {
     struct xrGetVisibilityMaskKHR_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrGetVisibilityMaskKHR)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrGetVisibilityMaskKHR(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrGetVisibilityMaskKHR(
         wine_session_from_handle(params->session)->host_session,
         params->viewConfigurationType,
         params->viewIndex,
         params->visibilityMaskType,
         params->visibilityMask);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrLocateHandJointsEXT(void *args)
 {
     struct xrLocateHandJointsEXT_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrLocateHandJointsEXT)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrLocateHandJointsEXT(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrLocateHandJointsEXT(
         params->handTracker,
         params->locateInfo,
         params->locations);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrLocateSpace(void *args)
 {
     struct xrLocateSpace_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrLocateSpace)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrLocateSpace(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrLocateSpace(
         params->space,
         params->baseSpace,
         params->time,
         params->location);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrLocateSpaces(void *args)
 {
     struct xrLocateSpaces_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrLocateSpaces)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrLocateSpaces(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrLocateSpaces(
         wine_session_from_handle(params->session)->host_session,
         params->locateInfo,
         params->spaceLocations);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrLocateSpacesKHR(void *args)
 {
     struct xrLocateSpacesKHR_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrLocateSpacesKHR)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrLocateSpacesKHR(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrLocateSpacesKHR(
         wine_session_from_handle(params->session)->host_session,
         params->locateInfo,
         params->spaceLocations);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrLocateViews(void *args)
 {
     struct xrLocateViews_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrLocateViews)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrLocateViews(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrLocateViews(
         wine_session_from_handle(params->session)->host_session,
         params->viewLocateInfo,
         params->viewState,
         params->viewCapacityInput,
         params->viewCountOutput,
         params->views);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrPathToString(void *args)
 {
     struct xrPathToString_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrPathToString)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrPathToString(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrPathToString(
         wine_instance_from_handle(params->instance)->host_instance,
         params->path,
         params->bufferCapacityInput,
         params->bufferCountOutput,
         params->buffer);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrPollEvent(void *args)
 {
     struct xrPollEvent_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrPollEvent)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrPollEvent(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrPollEvent(
         wine_instance_from_handle(params->instance)->host_instance,
         params->eventData);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrReleaseSwapchainImage(void *args)
 {
     struct xrReleaseSwapchainImage_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrReleaseSwapchainImage)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrReleaseSwapchainImage(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrReleaseSwapchainImage(
         wine_swapchain_from_handle(params->swapchain)->host_swapchain,
         params->releaseInfo);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrRequestDisplayRefreshRateFB(void *args)
 {
     struct xrRequestDisplayRefreshRateFB_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrRequestDisplayRefreshRateFB)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrRequestDisplayRefreshRateFB(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrRequestDisplayRefreshRateFB(
         wine_session_from_handle(params->session)->host_session,
         params->displayRefreshRate);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrRequestExitSession(void *args)
 {
     struct xrRequestExitSession_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrRequestExitSession)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrRequestExitSession(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrRequestExitSession(
         wine_session_from_handle(params->session)->host_session);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrResultToString(void *args)
 {
     struct xrResultToString_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrResultToString)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrResultToString(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrResultToString(
         wine_instance_from_handle(params->instance)->host_instance,
         params->value,
         params->buffer);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrStopHapticFeedback(void *args)
 {
     struct xrStopHapticFeedback_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrStopHapticFeedback)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrStopHapticFeedback(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrStopHapticFeedback(
         wine_session_from_handle(params->session)->host_session,
         params->hapticActionInfo);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrStringToPath(void *args)
 {
     struct xrStringToPath_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrStringToPath)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrStringToPath(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrStringToPath(
         wine_instance_from_handle(params->instance)->host_instance,
         params->pathString,
         params->path);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrStructureTypeToString(void *args)
 {
     struct xrStructureTypeToString_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrStructureTypeToString)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrStructureTypeToString(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrStructureTypeToString(
         wine_instance_from_handle(params->instance)->host_instance,
         params->value,
         params->buffer);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrStructureTypeToString2KHR(void *args)
 {
     struct xrStructureTypeToString2KHR_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrStructureTypeToString2KHR)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrStructureTypeToString2KHR(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrStructureTypeToString2KHR(
         wine_instance_from_handle(params->instance)->host_instance,
         params->value,
         params->buffer);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrSuggestInteractionProfileBindings(void *args)
 {
     struct xrSuggestInteractionProfileBindings_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrSuggestInteractionProfileBindings)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrSuggestInteractionProfileBindings(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrSuggestInteractionProfileBindings(
         wine_instance_from_handle(params->instance)->host_instance,
         params->suggestedBindings);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrSyncActions(void *args)
 {
     struct xrSyncActions_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrSyncActions)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrSyncActions(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrSyncActions(
         wine_session_from_handle(params->session)->host_session,
         params->syncInfo);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrWaitFrame(void *args)
 {
     struct xrWaitFrame_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrWaitFrame)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrWaitFrame(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrWaitFrame(
         wine_session_from_handle(params->session)->host_session,
         params->frameWaitInfo,
         params->frameState);
+
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS thunk_xrWaitSwapchainImage(void *args)
 {
     struct xrWaitSwapchainImage_params *params = args;
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    if (!funcs->p_xrWaitSwapchainImage)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
-    params->result = funcs->p_xrWaitSwapchainImage(
+
+    params->result = g_xr_host_instance_dispatch_table.p_xrWaitSwapchainImage(
         wine_swapchain_from_handle(params->swapchain)->host_swapchain,
         params->waitInfo);
+
     return STATUS_SUCCESS;
 }
+
+const struct openxr_instance_function openxr_instance_functions[] =
+{
+    {"xrAcquireSwapchainImage", offsetof(struct openxr_instance_funcs, p_xrAcquireSwapchainImage), NULL},
+    {"xrApplyHapticFeedback", offsetof(struct openxr_instance_funcs, p_xrApplyHapticFeedback), NULL},
+    {"xrAttachSessionActionSets", offsetof(struct openxr_instance_funcs, p_xrAttachSessionActionSets), NULL},
+    {"xrBeginFrame", offsetof(struct openxr_instance_funcs, p_xrBeginFrame), NULL},
+    {"xrBeginSession", offsetof(struct openxr_instance_funcs, p_xrBeginSession), NULL},
+    {"xrCreateAction", offsetof(struct openxr_instance_funcs, p_xrCreateAction), NULL},
+    {"xrCreateActionSet", offsetof(struct openxr_instance_funcs, p_xrCreateActionSet), NULL},
+    {"xrCreateActionSpace", offsetof(struct openxr_instance_funcs, p_xrCreateActionSpace), NULL},
+    {"xrCreateHandTrackerEXT", offsetof(struct openxr_instance_funcs, p_xrCreateHandTrackerEXT), "XR_EXT_hand_tracking"},
+    {"xrCreateReferenceSpace", offsetof(struct openxr_instance_funcs, p_xrCreateReferenceSpace), NULL},
+    {"xrCreateSession", offsetof(struct openxr_instance_funcs, p_xrCreateSession), NULL},
+    {"xrCreateSwapchain", offsetof(struct openxr_instance_funcs, p_xrCreateSwapchain), NULL},
+    {"xrDestroyAction", offsetof(struct openxr_instance_funcs, p_xrDestroyAction), NULL},
+    {"xrDestroyActionSet", offsetof(struct openxr_instance_funcs, p_xrDestroyActionSet), NULL},
+    {"xrDestroyHandTrackerEXT", offsetof(struct openxr_instance_funcs, p_xrDestroyHandTrackerEXT), "XR_EXT_hand_tracking"},
+    {"xrDestroyInstance", offsetof(struct openxr_instance_funcs, p_xrDestroyInstance), NULL},
+    {"xrDestroySession", offsetof(struct openxr_instance_funcs, p_xrDestroySession), NULL},
+    {"xrDestroySpace", offsetof(struct openxr_instance_funcs, p_xrDestroySpace), NULL},
+    {"xrDestroySwapchain", offsetof(struct openxr_instance_funcs, p_xrDestroySwapchain), NULL},
+    {"xrEndFrame", offsetof(struct openxr_instance_funcs, p_xrEndFrame), NULL},
+    {"xrEndSession", offsetof(struct openxr_instance_funcs, p_xrEndSession), NULL},
+    {"xrEnumerateBoundSourcesForAction", offsetof(struct openxr_instance_funcs, p_xrEnumerateBoundSourcesForAction), NULL},
+    {"xrEnumerateDisplayRefreshRatesFB", offsetof(struct openxr_instance_funcs, p_xrEnumerateDisplayRefreshRatesFB), "XR_FB_display_refresh_rate"},
+    {"xrEnumerateEnvironmentBlendModes", offsetof(struct openxr_instance_funcs, p_xrEnumerateEnvironmentBlendModes), NULL},
+    {"xrEnumerateReferenceSpaces", offsetof(struct openxr_instance_funcs, p_xrEnumerateReferenceSpaces), NULL},
+    {"xrEnumerateSwapchainFormats", offsetof(struct openxr_instance_funcs, p_xrEnumerateSwapchainFormats), NULL},
+    {"xrEnumerateSwapchainImages", offsetof(struct openxr_instance_funcs, p_xrEnumerateSwapchainImages), NULL},
+    {"xrEnumerateViewConfigurationViews", offsetof(struct openxr_instance_funcs, p_xrEnumerateViewConfigurationViews), NULL},
+    {"xrEnumerateViewConfigurations", offsetof(struct openxr_instance_funcs, p_xrEnumerateViewConfigurations), NULL},
+    {"xrGetActionStateBoolean", offsetof(struct openxr_instance_funcs, p_xrGetActionStateBoolean), NULL},
+    {"xrGetActionStateFloat", offsetof(struct openxr_instance_funcs, p_xrGetActionStateFloat), NULL},
+    {"xrGetActionStatePose", offsetof(struct openxr_instance_funcs, p_xrGetActionStatePose), NULL},
+    {"xrGetActionStateVector2f", offsetof(struct openxr_instance_funcs, p_xrGetActionStateVector2f), NULL},
+    {"xrGetCurrentInteractionProfile", offsetof(struct openxr_instance_funcs, p_xrGetCurrentInteractionProfile), NULL},
+    {"xrGetDisplayRefreshRateFB", offsetof(struct openxr_instance_funcs, p_xrGetDisplayRefreshRateFB), "XR_FB_display_refresh_rate"},
+    {"xrGetInputSourceLocalizedName", offsetof(struct openxr_instance_funcs, p_xrGetInputSourceLocalizedName), NULL},
+    {"xrGetInstanceProperties", offsetof(struct openxr_instance_funcs, p_xrGetInstanceProperties), NULL},
+    {"xrGetReferenceSpaceBoundsRect", offsetof(struct openxr_instance_funcs, p_xrGetReferenceSpaceBoundsRect), NULL},
+    {"xrGetSystem", offsetof(struct openxr_instance_funcs, p_xrGetSystem), NULL},
+    {"xrGetSystemProperties", offsetof(struct openxr_instance_funcs, p_xrGetSystemProperties), NULL},
+    {"xrGetViewConfigurationProperties", offsetof(struct openxr_instance_funcs, p_xrGetViewConfigurationProperties), NULL},
+    {"xrGetVisibilityMaskKHR", offsetof(struct openxr_instance_funcs, p_xrGetVisibilityMaskKHR), "XR_KHR_visibility_mask"},
+    {"xrLocateHandJointsEXT", offsetof(struct openxr_instance_funcs, p_xrLocateHandJointsEXT), "XR_EXT_hand_tracking"},
+    {"xrLocateSpace", offsetof(struct openxr_instance_funcs, p_xrLocateSpace), NULL},
+    {"xrLocateSpaces", offsetof(struct openxr_instance_funcs, p_xrLocateSpaces), NULL},
+    {"xrLocateSpacesKHR", offsetof(struct openxr_instance_funcs, p_xrLocateSpacesKHR), "XR_KHR_locate_spaces"},
+    {"xrLocateViews", offsetof(struct openxr_instance_funcs, p_xrLocateViews), NULL},
+    {"xrPathToString", offsetof(struct openxr_instance_funcs, p_xrPathToString), NULL},
+    {"xrPollEvent", offsetof(struct openxr_instance_funcs, p_xrPollEvent), NULL},
+    {"xrReleaseSwapchainImage", offsetof(struct openxr_instance_funcs, p_xrReleaseSwapchainImage), NULL},
+    {"xrRequestDisplayRefreshRateFB", offsetof(struct openxr_instance_funcs, p_xrRequestDisplayRefreshRateFB), "XR_FB_display_refresh_rate"},
+    {"xrRequestExitSession", offsetof(struct openxr_instance_funcs, p_xrRequestExitSession), NULL},
+    {"xrResultToString", offsetof(struct openxr_instance_funcs, p_xrResultToString), NULL},
+    {"xrStopHapticFeedback", offsetof(struct openxr_instance_funcs, p_xrStopHapticFeedback), NULL},
+    {"xrStringToPath", offsetof(struct openxr_instance_funcs, p_xrStringToPath), NULL},
+    {"xrStructureTypeToString", offsetof(struct openxr_instance_funcs, p_xrStructureTypeToString), NULL},
+    {"xrStructureTypeToString2KHR", offsetof(struct openxr_instance_funcs, p_xrStructureTypeToString2KHR), "XR_KHR_extended_struct_name_lengths"},
+    {"xrSuggestInteractionProfileBindings", offsetof(struct openxr_instance_funcs, p_xrSuggestInteractionProfileBindings), NULL},
+    {"xrSyncActions", offsetof(struct openxr_instance_funcs, p_xrSyncActions), NULL},
+    {"xrWaitFrame", offsetof(struct openxr_instance_funcs, p_xrWaitFrame), NULL},
+    {"xrWaitSwapchainImage", offsetof(struct openxr_instance_funcs, p_xrWaitSwapchainImage), NULL},
+#ifdef XR_USE_GRAPHICS_API_METAL
+    {"xrGetMetalGraphicsRequirementsKHR", offsetof(struct openxr_instance_funcs, p_xrGetMetalGraphicsRequirementsKHR), "XR_KHR_metal_enable"},
+#endif /* XR_USE_GRAPHICS_API_METAL */
+#ifdef XR_USE_TIMESPEC
+    {"xrConvertTimeToTimespecTimeKHR", offsetof(struct openxr_instance_funcs, p_xrConvertTimeToTimespecTimeKHR), "XR_KHR_convert_timespec_time"},
+    {"xrConvertTimespecTimeToTimeKHR", offsetof(struct openxr_instance_funcs, p_xrConvertTimespecTimeToTimeKHR), "XR_KHR_convert_timespec_time"},
+#endif /* XR_USE_TIMESPEC */
+};
+
+const unsigned int openxr_instance_function_count =
+    sizeof(openxr_instance_functions) / sizeof(openxr_instance_functions[0]);
 
 const unixlib_entry_t __wine_unix_call_funcs[] =
 {
     wine_init,
-    wine_is_available_instance_function,
     wine_create_d3d11_session,
     wine_release_metal_session,
     wine_export_metal_textures,
@@ -970,9 +790,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     thunk_xrAttachSessionActionSets,
     thunk_xrBeginFrame,
     thunk_xrBeginSession,
-    thunk_xrConvertTimeToTimespecTimeKHR,
     wine_xrConvertTimeToWin32PerformanceCounterKHR,
-    thunk_xrConvertTimespecTimeToTimeKHR,
     wine_xrConvertWin32PerformanceCounterToTimeKHR,
     thunk_xrCreateAction,
     thunk_xrCreateActionSet,

@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#ifndef __WINE_OPENXR_LOADER_H
-#define __WINE_OPENXR_LOADER_H
+#ifndef __WINE_OPENXR_BRIDGE_H
+#define __WINE_OPENXR_BRIDGE_H
 
 #include <stdint.h>
 #include "openxr/openxr.h"
@@ -21,7 +21,19 @@ typedef int D3D_FEATURE_LEVEL;
 typedef struct IUnknown IUnknown;
 #endif
 
-#include "loader_thunks.h"
+#include "unixcall.h"
+
+struct openxr_function
+{
+    const char *name;
+    void *pfn;
+    int extension;
+    uint32_t core_minor;
+    int global;
+};
+
+const struct openxr_function *wine_xr_find_function(const char *name);
+int wine_xr_extension_index(const char *name);
 
 #ifndef __WINEOPENXR_LIST_INLINE
 #define __WINEOPENXR_LIST_INLINE
@@ -48,13 +60,6 @@ static inline void list_remove(struct list *entry)
 struct init_params
 {
     NTSTATUS result;
-};
-
-struct is_available_instance_function_params
-{
-    XrInstance instance;
-    const char *name;
-    int available;
 };
 
 struct create_d3d11_session_params
@@ -87,15 +92,6 @@ struct export_metal_textures_params
     XrResult result;
 };
 
-struct xrEndFrame_params
-{
-    XrSession session;
-    const XrFrameEndInfo *frameEndInfo;
-    XrResult result;
-    uint64_t gpu_fence_value;
-    uint64_t mtl_shared_event;
-};
-
 struct wine_XrInstance
 {
     /* Keep host_instance first. wine_xrCreateInstance passes &host_instance to
@@ -115,6 +111,9 @@ struct wine_XrInstance
      * flips Monado's gotten_requirements, so the bridge must track it before
      * that call. Read and written under primary_session_lock */
     XrSystemId d3d11_requirements_queried_for;
+
+    XrVersion api_version;
+    uint64_t enabled_extensions[(XR_BRIDGE_EXTENSION_COUNT + 63) / 64];
 };
 
 struct wine_XrSession
@@ -183,8 +182,6 @@ static inline struct wine_XrSwapchain *wine_swapchain_from_handle(XrSwapchain ha
     return (struct wine_XrSwapchain *)(uintptr_t)handle;
 }
 
-void *wine_xr_get_instance_proc_addr(const char *name);
-
 #ifdef _WIN32
 #include <windows.h>
 
@@ -198,4 +195,4 @@ NTSTATUS WINAPI init_unix_call(void);
     __wine_unix_call_dispatcher(__wineopenxr_unixlib_handle, unix_##code, (params))
 #endif
 
-#endif /* __WINE_OPENXR_LOADER_H */
+#endif /* __WINE_OPENXR_BRIDGE_H */

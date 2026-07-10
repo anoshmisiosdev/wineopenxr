@@ -12,16 +12,16 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(openxr);
 
-typedef int32_t NTSTATUS;
 #define STATUS_SUCCESS ((NTSTATUS)0)
 
-/* Stubs for types the shared openxr_loader.h forward-declares but this TU
+/* Stubs for types the shared bridge.h forward-declares but this TU
  * never dereferences. They keep header chains from pulling in D3D11 or Win32
  * content that clashes with Metal.h */
 typedef struct { long long QuadPart; } LARGE_INTEGER;
 #define XR_USE_GRAPHICS_API_D3D11 1
 #define XR_USE_GRAPHICS_API_METAL 1
 #define XR_USE_PLATFORM_WIN32 1
+#define XR_USE_TIMESPEC 1
 typedef int D3D_FEATURE_LEVEL;
 typedef struct { unsigned int LowPart; int HighPart; } LUID;
 typedef struct ID3D11Device ID3D11Device;
@@ -32,9 +32,9 @@ typedef struct ID3D11Fence ID3D11Fence;
 typedef struct IMTLD3D11InteropDevice IMTLD3D11InteropDevice;
 typedef struct IUnknown IUnknown;
 
-#include "openxr_loader.h"
-#include "loader_thunks.h"
-#include "openxr_thunks.h"
+#include "bridge.h"
+#include "unixcall.h"
+#include "dispatch.h"
 
 extern struct openxr_instance_funcs g_xr_host_instance_dispatch_table;
 

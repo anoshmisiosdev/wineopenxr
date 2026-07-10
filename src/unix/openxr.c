@@ -8,6 +8,7 @@
 #define XR_USE_GRAPHICS_API_METAL
 #define XR_USE_GRAPHICS_API_D3D11
 #define XR_USE_PLATFORM_WIN32
+#define XR_USE_TIMESPEC
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
@@ -17,12 +18,12 @@
 #include "wine/unixlib.h"
 #include "wine/debug.h"
 
-#include "openxr_loader.h"
-#include "loader_thunks.h"
-#include "openxr_thunks.h"
-#include "format_table.h"
-#include "extension_table.h"
-#include "extension_filter_table.h"
+#include "bridge.h"
+#include "unixcall.h"
+#include "dispatch.h"
+#include "formats.h"
+#include "extension_substitutions.h"
+#include "extensions.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(openxr);
 
@@ -40,98 +41,13 @@ NTSTATUS wine_init(void *args)
     return STATUS_SUCCESS;
 }
 
-/* Map a bridge-synthesised function name to the host function the bridge
- * ultimately wraps. Returns NULL if the name is not a synthesised function.
- * The mapping lives in substitute_extensions so synthetic-function policy
- * and extension-substitution policy share one table */
-static const char *synthetic_host_equivalent(const char *name)
+static BOOL extension_is_supported(const char *name)
 {
     uint32_t i;
-    for (i = 0; i < ARRAY_SIZE(substitute_extensions); i++)
-    {
-        const struct extension_substitution *sub = &substitute_extensions[i];
-        const struct synthetic_function_mapping *mapping;
-
-        if (!sub->synthetic_mappings)
-            continue;
-        for (mapping = sub->synthetic_mappings; mapping->synthetic_name; mapping++)
-        {
-            if (!strcmp(name, mapping->synthetic_name))
-                return mapping->host_gate_name;
-        }
-    }
-    return NULL;
-}
-
-NTSTATUS wine_is_available_instance_function(void *args)
-{
-    struct is_available_instance_function_params *params = args;
-    struct wine_XrInstance *wine_instance;
-    const char *host_name;
-    XrInstance host_instance;
-    PFN_xrVoidFunction pfn;
-    XrResult res;
-
-    /* PE-side xrGetInstanceProcAddr handles NULL-instance entry points before
-     * calling us. A NULL instance here cannot be answered against an app-enabled
-     * extension set, so refuse the probe instead of exposing extension-gated names */
-    if (!params->instance)
-    {
-        params->available = FALSE;
-        return STATUS_SUCCESS;
-    }
-
-    wine_instance = wine_instance_from_handle(params->instance);
-    host_instance = wine_instance->host_instance;
-
-    /* Bridge-synthesised functions mirror the host's gate on the equivalent
-     * host function. The host's extension-enabled state is the app's view, so
-     * a synthetic is available iff the app enabled the aliased Win32 extension */
-    host_name = synthetic_host_equivalent(params->name);
-    if (host_name)
-    {
-        res = xrGetInstanceProcAddr(host_instance, host_name, &pfn);
-        params->available = (res == XR_SUCCESS && pfn != NULL);
-        return STATUS_SUCCESS;
-    }
-
-    res = xrGetInstanceProcAddr(host_instance, params->name, &pfn);
-    params->available = (res == XR_SUCCESS && pfn != NULL);
-    return STATUS_SUCCESS;
-}
-
-/* blocked_extensions holds host extensions the bridge cannot expose safely.
- * Hide them from enumeration and reject them in xrCreateInstance */
-static BOOL extension_is_blocked(const char *name)
-{
-    uint32_t i;
-    for (i = 0; i < ARRAY_SIZE(blocked_extensions); i++)
-        if (!strcmp(name, blocked_extensions[i]))
+    for (i = 0; i < ARRAY_SIZE(xr_bridge_extensions); i++)
+        if (!strcmp(name, xr_bridge_extensions[i]))
             return TRUE;
     return FALSE;
-}
-
-/* A host native_ext replaced by a Win32 alias is hidden from enumeration and
- * must be rejected in xrCreateInstance if the app asks for it directly. Per
- * OpenXR 1.1 xrCreateInstance, any name not returned by
- * xrEnumerateInstanceExtensionProperties MUST return
- * XR_ERROR_EXTENSION_NOT_PRESENT. Enumeration does NOT use this helper,
- * because apply_substitutions rewrites native_ext to win32_ext there */
-static BOOL extension_is_hidden_native(const char *name)
-{
-    uint32_t i;
-    for (i = 0; i < ARRAY_SIZE(substitute_extensions); i++)
-    {
-        const struct extension_substitution *sub = &substitute_extensions[i];
-        if (sub->native_ext && !strcmp(name, sub->native_ext))
-            return TRUE;
-    }
-    return FALSE;
-}
-
-static BOOL extension_is_rejected(const char *name)
-{
-    return extension_is_blocked(name) || extension_is_hidden_native(name);
 }
 
 static const char *translate_app_extension_name(const char *name)
@@ -186,9 +102,6 @@ static uint32_t apply_substitutions(const XrExtensionProperties *native_list,
         const XrExtensionProperties *native = &native_list[i];
         BOOL handled = FALSE;
 
-        if (extension_is_blocked(native->extensionName))
-            continue;
-
         for (j = 0; j < ARRAY_SIZE(substitute_extensions); j++)
         {
             const struct extension_substitution *sub = &substitute_extensions[j];
@@ -201,7 +114,7 @@ static uint32_t apply_substitutions(const XrExtensionProperties *native_list,
             handled = TRUE;
         }
 
-        if (!handled)
+        if (!handled && extension_is_supported(native->extensionName))
             emit_extension(out, out_cap, &output_count, native, NULL, 0);
     }
 
@@ -285,16 +198,12 @@ NTSTATUS wine_xrCreateInstance(void *args)
         goto out;
     }
 
-    /* Reject any app-requested extension filtered out of enumeration. Per
-     * spec an extension not visible through xrEnumerateInstanceExtensionProperties
-     * is not present. This covers explicitly blocked names and host native
-     * names hidden behind a Win32 alias */
     for (extension_index = 0;
          extension_index < params->createInfo->enabledExtensionCount;
          extension_index++)
     {
         const char *extension_name = params->createInfo->enabledExtensionNames[extension_index];
-        if (extension_is_rejected(extension_name))
+        if (!extension_is_supported(extension_name))
         {
             WARN("Rejecting extension not enumerated: %s\n", extension_name);
             res = XR_ERROR_EXTENSION_NOT_PRESENT;
@@ -321,6 +230,7 @@ NTSTATUS wine_xrCreateInstance(void *args)
     }
 
     our_info = *params->createInfo;
+    our_info.next = NULL;
     our_info.enabledExtensionNames = (const char *const *)new_list;
     our_info.enabledExtensionCount = translated_count;
     /* Layers live on the PE side. The Unix-side statically linked Khronos
@@ -344,13 +254,31 @@ NTSTATUS wine_xrCreateInstance(void *args)
     {
         struct wine_XrInstance *wine_instance = (struct wine_XrInstance *)(void *)params->instance;
         XrInstance host_instance = wine_instance->host_instance;
+        uint32_t function_index, name_index;
 
-#define USE_XR_FUNC(x) \
-        if (xrGetInstanceProcAddr(host_instance, #x, \
-                (PFN_xrVoidFunction *)&g_xr_host_instance_dispatch_table.p_##x) != XR_SUCCESS) \
-            g_xr_host_instance_dispatch_table.p_##x = NULL;
-        ALL_XR_INSTANCE_FUNCS()
-#undef USE_XR_FUNC
+        for (function_index = 0; function_index < openxr_instance_function_count; function_index++)
+        {
+            const struct openxr_instance_function *function = &openxr_instance_functions[function_index];
+            PFN_xrVoidFunction pfn = NULL;
+
+            if (function->extension)
+            {
+                BOOL enabled = FALSE;
+                for (name_index = 0; name_index < translated_count; name_index++)
+                {
+                    if (!strcmp(new_list[name_index], function->extension))
+                    {
+                        enabled = TRUE;
+                        break;
+                    }
+                }
+                if (!enabled)
+                    continue;
+            }
+
+            if (xrGetInstanceProcAddr(host_instance, function->name, &pfn) == XR_SUCCESS)
+                *(PFN_xrVoidFunction *)((char *)&g_xr_host_instance_dispatch_table + function->offset) = pfn;
+        }
     }
 
     g_instance_live = 1;

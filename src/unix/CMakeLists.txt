@@ -1,6 +1,6 @@
 add_library(wineopenxr_unix SHARED
     openxr.c
-    openxr_thunks.c
+    thunks.c
     session.m
     metal.m
 )
