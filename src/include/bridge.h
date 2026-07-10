@@ -69,7 +69,6 @@ struct create_d3d11_session_params
     XrSession *session;
     void *mtl_device;             /* id<MTLDevice>, owned +1 reference returned to caller */
     void *mtl_command_queue;      /* id<MTLCommandQueue>, owned +1 reference returned to caller */
-    void *mtl_listener;           /* MTLSharedEventListener *, owned +1 reference returned to caller */
     XrResult result;
 };
 
@@ -77,7 +76,6 @@ struct release_metal_session_params
 {
     void *mtl_device;             /* id<MTLDevice>, callee consumes caller's +1 reference */
     void *mtl_command_queue;      /* id<MTLCommandQueue>, callee consumes caller's +1 reference */
-    void *mtl_listener;           /* MTLSharedEventListener *, callee consumes caller's +1 reference */
 };
 
 struct export_metal_textures_params
@@ -123,15 +121,14 @@ struct wine_XrSession
 
     void *mtl_device;          /* id<MTLDevice>, owned +1 reference */
     void *mtl_command_queue;   /* id<MTLCommandQueue>, owned +1 reference */
-    void *mtl_listener;        /* MTLSharedEventListener *, owned +1 reference */
 
     IMTLD3D11InteropDevice *dxmt_device;
     ID3D11Device         *d3d11_device;
     ID3D11DeviceContext  *d3d11_context;
-    ID3D11DeviceContext4 *d3d11_context4;   /* cached to avoid per-frame QueryInterface */
+    ID3D11DeviceContext4 *d3d11_context4;   /* cached to avoid per-release QueryInterface */
 
     ID3D11Fence *gpu_fence;                 /* keeps the MTLSharedEvent behind mtl_shared_event alive */
-    volatile int64_t gpu_fence_value;       /* InterlockedIncrement64, monotonic */
+    int64_t gpu_fence_value;                /* monotonic, guarded by swapchain_lock */
     uint64_t mtl_shared_event;              /* borrowed id<MTLSharedEvent>, valid while gpu_fence lives */
 
     struct list swapchain_list;
@@ -163,8 +160,6 @@ struct wine_XrSwapchain
 
     XrSwapchainImageBaseHeader *images;
     uint32_t image_count;
-
-    volatile int64_t pending_fence_value;
 };
 
 static inline struct wine_XrInstance *wine_instance_from_handle(XrInstance handle)

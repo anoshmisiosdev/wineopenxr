@@ -73,8 +73,8 @@ FUNCTION_POLICIES = {
     "xrDestroySwapchain": ThunkPolicy(pe=MANUAL),
     "xrEnumerateSwapchainFormats": ThunkPolicy(unix=MANUAL),
     "xrEnumerateSwapchainImages": ThunkPolicy(pe=MANUAL),
-    "xrReleaseSwapchainImage": ThunkPolicy(pe=MANUAL),
-    "xrEndFrame": ThunkPolicy(pe=MANUAL, unix=MANUAL, extra_params=("uint64_t gpu_fence_value;", "uint64_t mtl_shared_event;")),
+    "xrReleaseSwapchainImage": ThunkPolicy(pe=MANUAL, unix=MANUAL, extra_params=("uint64_t gpu_fence_value;",)),
+    "xrEndFrame": ThunkPolicy(pe=MANUAL, unix=MANUAL),
 
     "xrGetD3D11GraphicsRequirementsKHR": ThunkPolicy(pe=MANUAL, unix=MANUAL, dispatch=False),
     "xrConvertTimeToWin32PerformanceCounterKHR": ThunkPolicy(pe=MANUAL, unix=MANUAL, dispatch=False),

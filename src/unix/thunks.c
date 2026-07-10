@@ -35,6 +35,7 @@ extern NTSTATUS wine_xrEndFrame(void *args);
 extern NTSTATUS wine_xrEnumerateInstanceExtensionProperties(void *args);
 extern NTSTATUS wine_xrEnumerateSwapchainFormats(void *args);
 extern NTSTATUS wine_xrGetD3D11GraphicsRequirementsKHR(void *args);
+extern NTSTATUS wine_xrReleaseSwapchainImage(void *args);
 
 static NTSTATUS thunk_xrAcquireSwapchainImage(void *args)
 {
@@ -568,17 +569,6 @@ static NTSTATUS thunk_xrPollEvent(void *args)
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS thunk_xrReleaseSwapchainImage(void *args)
-{
-    struct xrReleaseSwapchainImage_params *params = args;
-
-    params->result = g_xr_host_instance_dispatch_table.p_xrReleaseSwapchainImage(
-        wine_swapchain_from_handle(params->swapchain)->host_swapchain,
-        params->releaseInfo);
-
-    return STATUS_SUCCESS;
-}
-
 static NTSTATUS thunk_xrRequestDisplayRefreshRateFB(void *args)
 {
     struct xrRequestDisplayRefreshRateFB_params *params = args;
@@ -839,7 +829,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     thunk_xrLocateViews,
     thunk_xrPathToString,
     thunk_xrPollEvent,
-    thunk_xrReleaseSwapchainImage,
+    wine_xrReleaseSwapchainImage,
     thunk_xrRequestDisplayRefreshRateFB,
     thunk_xrRequestExitSession,
     thunk_xrResultToString,

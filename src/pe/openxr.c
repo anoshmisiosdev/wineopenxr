@@ -289,8 +289,8 @@ XrResult WINAPI xrDestroyInstance(XrInstance instance)
      *      otherwise the wrappers dangle when native xrDestroyInstance
      *      tears down the compositor-owned backing.
      *   2. Native xrDestroyInstance.
-     *   3. Metal device, command queue, and shared-event listener Release
-     *      on the Unix side. These are app-retained (see
+     *   3. Metal device and command queue Release on the Unix side.
+     *      These are app-retained (see
      *      wine_create_d3d11_session), not runtime-owned, so their
      *      lifetime is independent of native destroy.
      *
@@ -421,17 +421,15 @@ static void release_session_com_refs(struct wine_XrSession *sess)
 
 static void release_metal_session_handles(struct wine_XrSession *sess)
 {
-    if (sess->mtl_command_queue || sess->mtl_device || sess->mtl_listener)
+    if (sess->mtl_command_queue || sess->mtl_device)
     {
         struct release_metal_session_params params = {
             .mtl_device = sess->mtl_device,
             .mtl_command_queue = sess->mtl_command_queue,
-            .mtl_listener = sess->mtl_listener,
         };
         UNIX_CALL(release_metal_session, &params);
         sess->mtl_device = NULL;
         sess->mtl_command_queue = NULL;
-        sess->mtl_listener = NULL;
     }
 }
 
@@ -489,9 +487,9 @@ static XrResult create_session_d3d11(struct wine_XrInstance *wine_instance,
     ID3D11Device_GetImmediateContext(wine_session->d3d11_device,
                                      &wine_session->d3d11_context);
 
-    /* Cache ID3D11DeviceContext4 so the per-frame Signal call does not
-     * hit the DXMT QueryInterface vtable hop. DXMT always implements
-     * ID3D11DeviceContext4 */
+    /* Cache ID3D11DeviceContext4 so the per-release Signal call does
+     * not hit the DXMT QueryInterface vtable hop. DXMT always
+     * implements ID3D11DeviceContext4 */
     hr = ID3D11DeviceContext_QueryInterface(wine_session->d3d11_context,
         &IID_ID3D11DeviceContext4, (void **)&wine_session->d3d11_context4);
     if (FAILED(hr))
@@ -517,11 +515,10 @@ static XrResult create_session_d3d11(struct wine_XrInstance *wine_instance,
 
     wine_session->mtl_device = params.mtl_device;
     wine_session->mtl_command_queue = params.mtl_command_queue;
-    wine_session->mtl_listener = params.mtl_listener;
 
-    /* Plumb the MTLSharedEvent through an ID3D11Fence so per-frame
-     * Signal calls land in a native Metal event the compositor can wait
-     * on without a GPU sync */
+    /* Plumb the MTLSharedEvent through an ID3D11Fence so per-release
+     * Signal calls land in a native Metal event the binding queue
+     * GPU-waits on before the host reads the swapchain */
     {
         ID3D11Device5 *device5 = NULL;
         hr = ID3D11Device_QueryInterface(wine_session->d3d11_device,
@@ -999,22 +996,21 @@ XrResult WINAPI xrReleaseSwapchainImage(XrSwapchain swapchain,
     };
     NTSTATUS status;
 
-    if (wine_session->d3d11_context)
-    {
-        if (wine_session->gpu_fence)
-        {
-            LONGLONG value = InterlockedIncrement64(&wine_session->gpu_fence_value);
-            HRESULT hr = E_FAIL;
+    if (wine_session->gpu_fence && wine_session->d3d11_context4) {
+        LONGLONG value;
+        HRESULT hr;
 
-            if (wine_session->d3d11_context4)
-                hr = wine_session->d3d11_context4->lpVtbl->Signal(
-                    wine_session->d3d11_context4,
-                    (ID3D11Fence *)wine_session->gpu_fence, value);
+        EnterCriticalSection(&wine_session->swapchain_lock);
+        value = ++wine_session->gpu_fence_value;
+        hr = wine_session->d3d11_context4->lpVtbl->Signal(
+            wine_session->d3d11_context4,
+            (ID3D11Fence *)wine_session->gpu_fence, value);
+        LeaveCriticalSection(&wine_session->swapchain_lock);
 
-            if (SUCCEEDED(hr))
-                InterlockedExchange64(&wine_swapchain->pending_fence_value, value);
-            else
-                WINE_WARN("GPU fence signal failed: 0x%08x\n", (unsigned)hr);
+        if (SUCCEEDED(hr)) {
+            params.gpu_fence_value = (uint64_t)value;
+        } else {
+            WINE_WARN("GPU fence signal failed: 0x%08x\n", (unsigned)hr);
         }
     }
 
@@ -1037,26 +1033,13 @@ typedef union CompositionLayer {
     XrCompositionLayerCubeKHR cube;
 } CompositionLayer;
 
-static inline void collect_fence_value(struct wine_XrSwapchain *swapchain,
-                                       uint64_t *latest_release_fence)
-{
-    if (swapchain)
-    {
-        uint64_t fence_value = InterlockedExchange64(&swapchain->pending_fence_value, 0);
-        if (fence_value > *latest_release_fence)
-            *latest_release_fence = fence_value;
-    }
-}
-
-static void rewrite_subimage_swapchain(XrSwapchainSubImage *sub_image,
-                                       uint64_t *latest_release_fence)
+static void rewrite_subimage_swapchain(XrSwapchainSubImage *sub_image)
 {
     struct wine_XrSwapchain *wine_swapchain;
 
     wine_swapchain = wine_swapchain_from_handle(sub_image->swapchain);
     sub_image->swapchain = wine_swapchain ? wine_swapchain->host_swapchain
                                           : sub_image->swapchain;
-    collect_fence_value(wine_swapchain, latest_release_fence);
 }
 
 #define HANDLE_SUBIMAGE_LAYER(xr_type, field_name, src_type)                    \
@@ -1065,8 +1048,7 @@ static void rewrite_subimage_swapchain(XrSwapchainSubImage *sub_image,
         const src_type *src = (const src_type *)layer;                           \
         CompositionLayer *dst = &layer_storage[i];                               \
         dst->field_name = *src;                                                  \
-        rewrite_subimage_swapchain(&dst->field_name.subImage,                    \
-                                   &latest_release_fence);                       \
+        rewrite_subimage_swapchain(&dst->field_name.subImage);                   \
         host_layers[i] = &dst->base;                                             \
         break;                                                                    \
     }
@@ -1074,7 +1056,6 @@ static void rewrite_subimage_swapchain(XrSwapchainSubImage *sub_image,
 XrResult WINAPI xrEndFrame(XrSession session,
                            const XrFrameEndInfo *frameEndInfo)
 {
-    struct wine_XrSession *wine_session = wine_session_from_handle(session);
     struct xrEndFrame_params params;
     XrFrameEndInfo our_end_info;
     CompositionLayer *layer_storage = NULL;
@@ -1084,7 +1065,6 @@ XrResult WINAPI xrEndFrame(XrSession session,
     uint32_t layer_count;
     size_t total_views = 0;
     size_t view_offset = 0;
-    uint64_t latest_release_fence = 0;
     XrResult result = XR_ERROR_RUNTIME_FAILURE;
     NTSTATUS status;
     uint32_t i;
@@ -1148,7 +1128,7 @@ XrResult WINAPI xrEndFrame(XrSession session,
 
                 /* Shallow copy preserves allowed next-chain payloads */
                 *dst_view = *src_view;
-                rewrite_subimage_swapchain(&dst_view->subImage, &latest_release_fence);
+                rewrite_subimage_swapchain(&dst_view->subImage);
 
                 /* Rewrite depth only at the ProjectionView next head. Extension
                  * policy must hide any app-visible view next payload that can
@@ -1163,7 +1143,7 @@ XrResult WINAPI xrEndFrame(XrSession session,
                         &host_depth_infos[view_offset + v];
 
                     *di = *src_depth;
-                    rewrite_subimage_swapchain(&di->subImage, &latest_release_fence);
+                    rewrite_subimage_swapchain(&di->subImage);
                     dst_view->next = di;
                 }
             }
@@ -1194,7 +1174,6 @@ XrResult WINAPI xrEndFrame(XrSession session,
             wine_swapchain = wine_swapchain_from_handle(src->swapchain);
             dst->cube.swapchain = wine_swapchain ? wine_swapchain->host_swapchain
                                                  : src->swapchain;
-            collect_fence_value(wine_swapchain, &latest_release_fence);
 
             host_layers[i] = &dst->base;
             break;
@@ -1211,12 +1190,6 @@ XrResult WINAPI xrEndFrame(XrSession session,
 
     params.session = session;
     params.frameEndInfo = &our_end_info;
-
-    if (latest_release_fence && wine_session->mtl_shared_event)
-    {
-        params.gpu_fence_value = latest_release_fence;
-        params.mtl_shared_event = wine_session->mtl_shared_event;
-    }
 
     status = UNIX_CALL(xrEndFrame, &params);
     if (status)

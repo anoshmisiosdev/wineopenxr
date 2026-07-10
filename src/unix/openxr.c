@@ -527,27 +527,31 @@ NTSTATUS wine_xrConvertWin32PerformanceCounterToTimeKHR(void *args)
     return STATUS_SUCCESS;
 }
 
-extern int wait_gpu_fence(void *mtl_listener_ptr,
-                          uint64_t mtl_shared_event_ptr,
-                          uint64_t fence_value);
+extern void encode_gpu_wait(void *mtl_command_queue,
+                            uint64_t mtl_shared_event,
+                            uint64_t fence_value);
 
-/* This TU and metal.m both cache WINEOPENXR_GPU_SYNC_STATS on first use, so
- * normal process startup configuration lands on the same value */
-static int gpu_sync_stats_enabled(void)
+NTSTATUS wine_xrReleaseSwapchainImage(void *args)
 {
-    static int cached = -1;
-    if (cached < 0)
-    {
-        const char *env = getenv("WINEOPENXR_GPU_SYNC_STATS");
-        cached = (env && env[0] == '1') ? 1 : 0;
+    struct xrReleaseSwapchainImage_params *params = args;
+    struct wine_XrSwapchain *wine_swapchain = wine_swapchain_from_handle(params->swapchain);
+    struct wine_XrSession *wine_session = wine_swapchain->session;
+    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
+
+    if (!funcs->p_xrReleaseSwapchainImage) {
+        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
+        return STATUS_SUCCESS;
     }
-    return cached;
-}
 
-static double elapsed_ms(const struct timespec *start, const struct timespec *end)
-{
-    return ((end->tv_sec - start->tv_sec) * 1e3)
-         + ((end->tv_nsec - start->tv_nsec) / 1e6);
+    if (params->gpu_fence_value && wine_session->mtl_shared_event) {
+        encode_gpu_wait(wine_session->mtl_command_queue,
+                        wine_session->mtl_shared_event,
+                        params->gpu_fence_value);
+    }
+
+    params->result = funcs->p_xrReleaseSwapchainImage(wine_swapchain->host_swapchain,
+                                                      params->releaseInfo);
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS wine_xrEndFrame(void *args)
@@ -555,47 +559,13 @@ NTSTATUS wine_xrEndFrame(void *args)
     struct xrEndFrame_params *params = args;
     struct wine_XrSession *wine_session = wine_session_from_handle(params->session);
     struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    struct timespec native_start, native_end;
-    int gpu_sync_stats = gpu_sync_stats_enabled();
 
-    if (params->gpu_fence_value && params->mtl_shared_event)
-    {
-        struct timespec fence_start, fence_end;
-        int wait_result;
-        if (gpu_sync_stats)
-            clock_gettime(CLOCK_MONOTONIC, &fence_start);
-        wait_result = wait_gpu_fence(wine_session->mtl_listener,
-                                     params->mtl_shared_event,
-                                     params->gpu_fence_value);
-        if (wait_result < 0)
-            WARN("GPU fence wait timed out (value=%llu), submitting anyway\n",
-                 (unsigned long long)params->gpu_fence_value);
-        if (gpu_sync_stats)
-        {
-            clock_gettime(CLOCK_MONOTONIC, &fence_end);
-            TRACE("gpu_sync xrEndFrame fence_wait_ms=%.2f\n",
-                  elapsed_ms(&fence_start, &fence_end));
-        }
-    }
-
-    if (!funcs->p_xrEndFrame)
-    {
+    if (!funcs->p_xrEndFrame) {
         params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
         return STATUS_SUCCESS;
     }
 
-    if (gpu_sync_stats)
-        clock_gettime(CLOCK_MONOTONIC, &native_start);
-
     params->result = funcs->p_xrEndFrame(wine_session->host_session,
                                          params->frameEndInfo);
-
-    if (gpu_sync_stats)
-    {
-        clock_gettime(CLOCK_MONOTONIC, &native_end);
-        TRACE("gpu_sync xrEndFrame native_ms=%.2f\n",
-              elapsed_ms(&native_start, &native_end));
-    }
-
     return STATUS_SUCCESS;
 }

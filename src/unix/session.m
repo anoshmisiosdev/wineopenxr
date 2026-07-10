@@ -51,7 +51,6 @@ NTSTATUS wine_create_d3d11_session(void *args)
         XrResult res = XR_SUCCESS;
         id<MTLDevice> device = nil;
         id<MTLCommandQueue> queue = nil;
-        MTLSharedEventListener *listener = nil;
 
         if (!funcs->p_xrGetMetalGraphicsRequirementsKHR)
         {
@@ -85,14 +84,6 @@ NTSTATUS wine_create_d3d11_session(void *args)
             goto out;
         }
 
-        listener = [[MTLSharedEventListener alloc] init];
-        if (!listener)
-        {
-            WINE_ERR("MTLSharedEventListener alloc failed\n");
-            res = XR_ERROR_RUNTIME_FAILURE;
-            goto out;
-        }
-
         {
             XrGraphicsBindingMetalKHR metal_binding = {
                 .type = XR_TYPE_GRAPHICS_BINDING_METAL_KHR,
@@ -117,13 +108,10 @@ NTSTATUS wine_create_d3d11_session(void *args)
 
         params->mtl_device = (void *)device;
         params->mtl_command_queue = (void *)queue;
-        params->mtl_listener = (void *)listener;
         device = nil;
         queue = nil;
-        listener = nil;
 
 out:
-        [listener release];
         [queue release];
         [device release];
         params->result = res;
@@ -136,7 +124,6 @@ NTSTATUS wine_release_metal_session(void *args)
     @autoreleasepool {
         struct release_metal_session_params *params = args;
 
-        [(MTLSharedEventListener *)params->mtl_listener release];
         [(id<MTLCommandQueue>)params->mtl_command_queue release];
         [(id<MTLDevice>)params->mtl_device release];
 

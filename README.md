@@ -86,8 +86,6 @@ Start your native OpenXR runtime, then launch the app through CrossOver GUI or S
 
 Enable Wine's `+openxr` debug channel to capture bridge logs from both `wineopenxr.dll` and `wineopenxr.so`.
 
-Set `WINEOPENXR_GPU_SYNC_STATS=1` for additional `gpu_sync` timing lines covering `xrEndFrame` native time, Metal fence waits, timeout counts, and per-second wait summaries.
-
 ## License
 
 LGPL-2.1-or-later. See `LICENSE` and `COPYING.LIB`.

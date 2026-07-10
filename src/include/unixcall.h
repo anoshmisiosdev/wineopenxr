@@ -233,8 +233,6 @@ struct xrEndFrame_params
     XrSession session;
     const XrFrameEndInfo * frameEndInfo;
     XrResult result;
-    uint64_t gpu_fence_value;
-    uint64_t mtl_shared_event;
 };
 
 struct xrEndSession_params
@@ -503,6 +501,7 @@ struct xrReleaseSwapchainImage_params
     XrSwapchain swapchain;
     const XrSwapchainImageReleaseInfo * releaseInfo;
     XrResult result;
+    uint64_t gpu_fence_value;
 };
 
 struct xrRequestDisplayRefreshRateFB_params
