@@ -67,6 +67,21 @@ static const char *translate_app_extension_name(const char *name)
     return name;
 }
 
+/* True if the app-visible extension is implemented entirely by the bridge
+ * (see bridge_only_extensions in extension_substitutions.h) and therefore
+ * must never be forwarded to the host's xrCreateInstance - the host has no
+ * matching extension name and would reject it */
+static BOOL extension_is_bridge_only(const char *name)
+{
+    uint32_t i;
+
+    for (i = 0; i < ARRAY_SIZE(bridge_only_extensions); i++)
+        if (!strcmp(name, bridge_only_extensions[i].win32_ext))
+            return TRUE;
+
+    return FALSE;
+}
+
 static void emit_extension(XrExtensionProperties *out,
                            uint32_t out_cap,
                            uint32_t *output_count,
@@ -89,7 +104,11 @@ static void emit_extension(XrExtensionProperties *out,
 /* Walks native_list once. If out is non-NULL, writes up to out_cap entries.
  * Always returns the full output count so the count and fill paths of
  * xrEnumerateInstanceExtensionProperties share one implementation and
- * cannot drift. Native aliases are replaced with Win32 names */
+ * cannot drift. Native aliases are replaced with Win32 names.
+ *
+ * bridge_only_extensions are appended unconditionally afterward - the
+ * bridge implements these itself, so their availability does not depend on
+ * anything the host enumerates */
 static uint32_t apply_substitutions(const XrExtensionProperties *native_list,
                                     uint32_t native_count,
                                     XrExtensionProperties *out,
@@ -116,6 +135,21 @@ static uint32_t apply_substitutions(const XrExtensionProperties *native_list,
 
         if (!handled && extension_is_supported(native->extensionName))
             emit_extension(out, out_cap, &output_count, native, NULL, 0);
+    }
+
+    for (i = 0; i < ARRAY_SIZE(bridge_only_extensions); i++)
+    {
+        const struct extension_substitution *ext = &bridge_only_extensions[i];
+
+        if (out && output_count < out_cap)
+        {
+            XrExtensionProperties *slot = &out[output_count];
+            slot->type = XR_TYPE_EXTENSION_PROPERTIES;
+            slot->next = NULL;
+            strcpy(slot->extensionName, ext->win32_ext);
+            slot->extensionVersion = ext->version;
+        }
+        output_count++;
     }
 
     return output_count;
@@ -226,6 +260,16 @@ NTSTATUS wine_xrCreateInstance(void *args)
          extension_index++)
     {
         const char *extension_name = params->createInfo->enabledExtensionNames[extension_index];
+
+        /* Bridge-only extensions have no host-side counterpart to forward
+         * to; the host would reject a name it does not recognize */
+        if (extension_is_bridge_only(extension_name))
+        {
+            TRACE("Extension %s implemented by the bridge; not forwarding to host\n",
+                  extension_name);
+            continue;
+        }
+
         new_list[translated_count++] = translate_app_extension_name(extension_name);
     }
 
@@ -466,64 +510,97 @@ static LONGLONG qpc_to_monotonic_offset(void)
     return qpc_monotonic_offset;
 }
 
+/* OXRSys does not implement XR_KHR_convert_timespec_time (confirmed: its own
+ * xrEnumerateInstanceExtensionProperties never reports it), so the two
+ * functions below cannot pivot QPC<->XrTime through the host as originally
+ * written. Empirically, OXRSys's XrTime values run in the same nanosecond,
+ * 1:1-rate domain as CLOCK_MONOTONIC: a live capture around xrWaitFrame
+ * (before/after CLOCK_MONOTONIC samples bracketing the host call, vs. the
+ * predictedDisplayTime it returned) over ~3250 frames / ~42s of runtime
+ * showed (predictedDisplayTime - CLOCK_MONOTONIC_ns) constant to within
+ * ~20ms - matching the frame-to-frame prediction-horizon jitter already
+ * visible in OXRSys's own latency logging, not clock drift. The epoch is
+ * different (looks like time since the OXRSys session started, not since
+ * boot), exactly like QPC vs. CLOCK_MONOTONIC above, so the same "sample
+ * once, reuse" calibration strategy applies, pivoting through
+ * CLOCK_MONOTONIC directly instead of through the host */
+static pthread_mutex_t xrtime_offset_lock = PTHREAD_MUTEX_INITIALIZER;
+static LONGLONG xrtime_monotonic_offset;
+static BOOL xrtime_offset_ready;
+
+static LONGLONG monotonic_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (LONGLONG)ts.tv_sec * NANOSECONDS_IN_A_SECOND + ts.tv_nsec;
+}
+
+/* Establishes the offset on the first call to either conversion direction
+ * and reuses it forever after, so a QPC->time->QPC roundtrip is always
+ * exactly self-consistent regardless of how accurate that first sample was
+ * (same reasoning as qpc_offset_init above). `seed` should be a genuine
+ * host-produced XrTime when the caller has one -
+ * ConvertTimeToWin32PerformanceCounterKHR always does, since params->time
+ * comes straight from the runtime (e.g. an XrFrameState.predictedDisplayTime).
+ * ConvertWin32PerformanceCounterToTimeKHR has no XrTime of its own to
+ * calibrate from; if it is the very first call the bridge ever sees for
+ * this pair (apps normally source a time from OpenXR itself, e.g.
+ * xrWaitFrame, before ever wanting to convert one, so this is an unusual
+ * ordering), it passes the current CLOCK_MONOTONIC reading as the seed,
+ * bootstrapping a 0 offset until a real one comes along */
+static LONGLONG xrtime_to_monotonic_offset(XrTime seed)
+{
+    pthread_mutex_lock(&xrtime_offset_lock);
+    if (!xrtime_offset_ready)
+    {
+        xrtime_monotonic_offset = seed - monotonic_now_ns();
+        xrtime_offset_ready = TRUE;
+    }
+    pthread_mutex_unlock(&xrtime_offset_lock);
+
+    return xrtime_monotonic_offset;
+}
+
 NTSTATUS wine_xrConvertTimeToWin32PerformanceCounterKHR(void *args)
 {
     struct xrConvertTimeToWin32PerformanceCounterKHR_params *params = args;
-    struct wine_XrInstance *wine_instance = wine_instance_from_handle(params->instance);
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    struct timespec ts;
+    LONGLONG monotonic_ns, monotonic_ticks;
 
-    if (!funcs->p_xrConvertTimeToTimespecTimeKHR)
+    if (params->time <= 0)
     {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
+        params->result = XR_ERROR_TIME_INVALID;
         return STATUS_SUCCESS;
     }
 
-    params->result = funcs->p_xrConvertTimeToTimespecTimeKHR(
-        wine_instance->host_instance, params->time, &ts);
+    monotonic_ns = params->time - xrtime_to_monotonic_offset(params->time);
+    monotonic_ticks = monotonic_ns / (NANOSECONDS_IN_A_SECOND / TICKSPERSEC);
+    params->performanceCounter->QuadPart = monotonic_ticks + qpc_to_monotonic_offset();
 
-    if (params->result == XR_SUCCESS)
-    {
-        LONGLONG monotonic_qpc = (LONGLONG)ts.tv_sec * TICKSPERSEC
-                               + ts.tv_nsec / (NANOSECONDS_IN_A_SECOND / TICKSPERSEC);
-        params->performanceCounter->QuadPart = monotonic_qpc + qpc_to_monotonic_offset();
-    }
-
+    params->result = XR_SUCCESS;
     return STATUS_SUCCESS;
 }
 
 NTSTATUS wine_xrConvertWin32PerformanceCounterToTimeKHR(void *args)
 {
     struct xrConvertWin32PerformanceCounterToTimeKHR_params *params = args;
-    struct wine_XrInstance *wine_instance = wine_instance_from_handle(params->instance);
-    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-    struct timespec ts;
-    LONGLONG monotonic_qpc;
+    LONGLONG monotonic_ticks, monotonic_ns;
 
-    /* Bridge substitutes XR_KHR_win32_convert_performance_counter_time with
-     * XR_KHR_convert_timespec_time, whose host-side xrConvertTimespecTimeToTimeKHR
-     * does not reject non-positive inputs. Mirror Monado's native QPC validation
-     * (oxr_api_instance.c rejects QuadPart <= 0 with XR_ERROR_TIME_INVALID) so
-     * the substituted path behaves like the direct one */
+    /* Bridge implements XR_KHR_win32_convert_performance_counter_time
+     * entirely itself now, with no host call left to reject a bad input.
+     * Mirror Monado's native QPC validation (oxr_api_instance.c rejects
+     * QuadPart <= 0 with XR_ERROR_TIME_INVALID) */
     if (params->performanceCounter->QuadPart <= 0)
     {
         params->result = XR_ERROR_TIME_INVALID;
         return STATUS_SUCCESS;
     }
 
-    if (!funcs->p_xrConvertTimespecTimeToTimeKHR)
-    {
-        params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-        return STATUS_SUCCESS;
-    }
+    monotonic_ticks = params->performanceCounter->QuadPart - qpc_to_monotonic_offset();
+    monotonic_ns = monotonic_ticks * (NANOSECONDS_IN_A_SECOND / TICKSPERSEC);
 
-    monotonic_qpc = params->performanceCounter->QuadPart - qpc_to_monotonic_offset();
-    ts.tv_sec = (time_t)(monotonic_qpc / TICKSPERSEC);
-    ts.tv_nsec = (long)((monotonic_qpc % TICKSPERSEC) * (NANOSECONDS_IN_A_SECOND / TICKSPERSEC));
+    *params->time = monotonic_ns + xrtime_to_monotonic_offset(monotonic_now_ns());
 
-    params->result = funcs->p_xrConvertTimespecTimeToTimeKHR(
-        wine_instance->host_instance, &ts, params->time);
-
+    params->result = XR_SUCCESS;
     return STATUS_SUCCESS;
 }
 

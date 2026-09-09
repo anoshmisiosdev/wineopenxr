@@ -33,8 +33,24 @@ struct extension_substitution {
 static const struct extension_substitution substitute_extensions[] = {
     {"XR_KHR_D3D11_enable", "XR_KHR_metal_enable",
      XR_KHR_D3D11_enable_SPEC_VERSION},
-    {"XR_KHR_win32_convert_performance_counter_time",
-     "XR_KHR_convert_timespec_time",
+};
+
+/* Extensions the bridge implements entirely on its own side, with no native
+ * host counterpart. Unlike substitute_extensions above, these are advertised
+ * to the app unconditionally (not gated on the host reporting some native
+ * alias), and never forwarded to the host's xrCreateInstance at all -
+ * extension_is_bridge_only() in src/unix/openxr.c reads this table to
+ * filter them out.
+ *
+ * XR_KHR_win32_convert_performance_counter_time lives here because OXRSys
+ * does not implement XR_KHR_convert_timespec_time (the extension this used
+ * to be substituted for), so it can never be advertised via the mechanism
+ * above. The bridge instead implements the QPC<->XrTime math itself in
+ * src/unix/openxr.c, pivoting through CLOCK_MONOTONIC, since empirically
+ * OXRSys's XrTime values already run at CLOCK_MONOTONIC's rate (same
+ * nanosecond unit, 1:1 rate, fixed but arbitrary epoch offset) */
+static const struct extension_substitution bridge_only_extensions[] = {
+    {"XR_KHR_win32_convert_performance_counter_time", NULL,
      XR_KHR_win32_convert_performance_counter_time_SPEC_VERSION},
 };
 
