@@ -5,6 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <mach/mach.h>
+#include <servers/bootstrap.h>
 
 #include "wine/debug_slim.h"
 
@@ -29,7 +33,6 @@ typedef struct ID3D11DeviceContext ID3D11DeviceContext;
 typedef struct ID3D11Texture2D ID3D11Texture2D;
 typedef struct ID3D11DeviceContext4 ID3D11DeviceContext4;
 typedef struct ID3D11Fence ID3D11Fence;
-typedef struct IMTLD3D11InteropDevice IMTLD3D11InteropDevice;
 typedef struct IUnknown IUnknown;
 
 #include "bridge.h"
@@ -37,6 +40,78 @@ typedef struct IUnknown IUnknown;
 #include "dispatch.h"
 
 extern struct openxr_instance_funcs g_xr_host_instance_dispatch_table;
+
+/* Private Metal SPI, same pair DXMT's winemetal uses to move an IOSurface
+ * (texture) or a shared event between processes/graphics stacks as a mach
+ * send right. The bridge stays on the same mechanism so a STOCK DXMT can
+ * import what the OpenXR runtime allocated */
+@interface MTLSharedTextureHandle (OXRSysBridge)
+- (mach_port_t)createMachPort;
+@end
+
+@protocol OXRSysMTLDeviceSPI <MTLDevice>
+- (id<MTLSharedEvent>)newSharedEventWithMachPort:(mach_port_t)machPort;
+@end
+
+/* bootstrap_register() is deprecated-with-no-replacement in the SDK headers but
+ * is the only way to publish a send right under a name; DXMT relies on the same
+ * call from its unix half, in this same task */
+extern kern_return_t bootstrap_register2(mach_port_t bp, name_t service_name,
+                                         mach_port_t sp, int flags);
+
+/* Publish `port` under a fresh launchd service name. Writes a NUL-terminated
+ * name of at most OXR_MACH_NAME_LEN-1 chars into out_name. Returns 0 on
+ * failure. The registration (like DXMT's) lives for the life of the process */
+static int bridge_register_mach_port(mach_port_t port,
+                                     char out_name[OXR_MACH_NAME_LEN])
+{
+    static uint64_t counter;
+    mach_port_t bootstrap = MACH_PORT_NULL;
+    kern_return_t kr;
+
+    if (!port)
+        return 0;
+
+    if (task_get_bootstrap_port(mach_task_self(), &bootstrap) != KERN_SUCCESS)
+        return 0;
+
+    /* 20 + 8 + 1 + 16 + 1 = 46 bytes, inside the 54-byte field */
+    snprintf(out_name, OXR_MACH_NAME_LEN, "OXRSys_bridge_shared_%08x_%016llx",
+             (unsigned)getpid(), (unsigned long long)(++counter) ^ ((unsigned long long)arc4random() << 32));
+
+    kr = bootstrap_register2(bootstrap, out_name, port, 0);
+    mach_port_deallocate(mach_task_self(), bootstrap);
+
+    if (kr != KERN_SUCCESS)
+    {
+        WINE_ERR("bootstrap_register2(%s) failed: 0x%x\n", out_name, (unsigned)kr);
+        out_name[0] = 0;
+        return 0;
+    }
+    return 1;
+}
+
+static mach_port_t bridge_look_up_mach_port(const char *name)
+{
+    mach_port_t bootstrap = MACH_PORT_NULL, port = MACH_PORT_NULL;
+    kern_return_t kr;
+
+    if (!name || !name[0])
+        return MACH_PORT_NULL;
+
+    if (task_get_bootstrap_port(mach_task_self(), &bootstrap) != KERN_SUCCESS)
+        return MACH_PORT_NULL;
+
+    kr = bootstrap_look_up(bootstrap, (char *)name, &port);
+    mach_port_deallocate(mach_task_self(), bootstrap);
+
+    if (kr != KERN_SUCCESS)
+    {
+        WINE_ERR("bootstrap_look_up(%s) failed: 0x%x\n", name, (unsigned)kr);
+        return MACH_PORT_NULL;
+    }
+    return port;
+}
 
 NTSTATUS wine_create_d3d11_session(void *args)
 {
@@ -106,6 +181,25 @@ NTSTATUS wine_create_d3d11_session(void *args)
             goto out;
         }
 
+        /* Open our own id<MTLSharedEvent> on the same underlying event the
+         * app-side ID3D11Fence signals, so the release path can encode a GPU
+         * wait on the runtime's queue. Stock DXMT publishes the event's mach
+         * port under this name from ID3D11Fence::CreateSharedHandle */
+        if (params->fence_mach_port_name[0])
+        {
+            mach_port_t port = bridge_look_up_mach_port(params->fence_mach_port_name);
+            if (port)
+            {
+                id<MTLSharedEvent> event =
+                    [(id<OXRSysMTLDeviceSPI>)device newSharedEventWithMachPort:port];
+                if (event)
+                    params->mtl_shared_event = (uint64_t)(uintptr_t)event;
+                else
+                    WINE_ERR("newSharedEventWithMachPort failed for %s\n",
+                             params->fence_mach_port_name);
+            }
+        }
+
         params->mtl_device = (void *)device;
         params->mtl_command_queue = (void *)queue;
         device = nil;
@@ -124,6 +218,7 @@ NTSTATUS wine_release_metal_session(void *args)
     @autoreleasepool {
         struct release_metal_session_params *params = args;
 
+        [(id<MTLSharedEvent>)(void *)(uintptr_t)params->mtl_shared_event release];
         [(id<MTLCommandQueue>)params->mtl_command_queue release];
         [(id<MTLDevice>)params->mtl_device release];
 
@@ -228,6 +323,44 @@ NTSTATUS wine_export_metal_textures(void *args)
 
         for (i = 0; i < count; i++)
             params->mtl_textures[i] = (uint64_t)(uintptr_t)metal_images[i].texture;
+
+        /* Publish each image's IOSurface as a mach send right under a unique
+         * launchd name. The PE side wraps the name in a D3DKMT shared-resource
+         * record, and stock DXMT's ID3D11Device::OpenSharedResource looks it
+         * back up and rebuilds the MTLTexture - no DXMT patch needed.
+         * Requires the runtime to have allocated the images with
+         * newSharedTextureWithDescriptor: (OXRSys does) */
+        if (params->mach_port_names)
+        {
+            for (i = 0; i < count; i++)
+            {
+                id<MTLTexture> texture = (id<MTLTexture>)metal_images[i].texture;
+                MTLSharedTextureHandle *handle = [texture newSharedTextureHandle];
+                mach_port_t port = MACH_PORT_NULL;
+
+                params->mach_port_names[i][0] = 0;
+
+                if (!handle)
+                {
+                    WINE_ERR("swapchain image %u is not a Metal shared texture; "
+                             "the OpenXR runtime must allocate swapchain images "
+                             "with newSharedTextureWithDescriptor:\n", i);
+                    free(metal_images);
+                    params->result = XR_ERROR_RUNTIME_FAILURE;
+                    return STATUS_SUCCESS;
+                }
+
+                port = [handle createMachPort];
+                [handle release];
+
+                if (!bridge_register_mach_port(port, params->mach_port_names[i]))
+                {
+                    free(metal_images);
+                    params->result = XR_ERROR_RUNTIME_FAILURE;
+                    return STATUS_SUCCESS;
+                }
+            }
+        }
 
         free(metal_images);
 

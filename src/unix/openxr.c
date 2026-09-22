@@ -608,6 +608,10 @@ extern void encode_gpu_wait(void *mtl_command_queue,
                             uint64_t mtl_shared_event,
                             uint64_t fence_value);
 
+extern int gpu_fence_value_reached(uint64_t mtl_shared_event,
+                                   uint64_t fence_value,
+                                   unsigned timeout_ms);
+
 NTSTATUS wine_xrReleaseSwapchainImage(void *args)
 {
     struct xrReleaseSwapchainImage_params *params = args;
@@ -618,6 +622,23 @@ NTSTATUS wine_xrReleaseSwapchainImage(void *args)
     if (!funcs->p_xrReleaseSwapchainImage) {
         params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
         return STATUS_SUCCESS;
+    }
+
+    /* The value the PE side reports is a count of sync-carrier releases, which
+     * matches the Metal event only if DXMT's keyed mutex really starts at 0 and
+     * steps by one. Confirm that on the first release rather than risk queueing
+     * a GPU wait for a value that never arrives, which would wedge the runtime's
+     * queue for good */
+    if (params->gpu_fence_value && wine_session->mtl_shared_event &&
+        !wine_session->gpu_fence_checked) {
+        wine_session->gpu_fence_checked = 1;
+        if (!gpu_fence_value_reached(wine_session->mtl_shared_event,
+                                     params->gpu_fence_value, 1000)) {
+            WINE_ERR("the sync carrier's shared event did not reach %llu; "
+                     "disabling the GPU release fence for this session\n",
+                     (unsigned long long)params->gpu_fence_value);
+            wine_session->mtl_shared_event = 0;
+        }
     }
 
     if (params->gpu_fence_value && wine_session->mtl_shared_event) {

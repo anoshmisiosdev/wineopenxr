@@ -6,14 +6,12 @@
 #include <stdint.h>
 #include "openxr/openxr.h"
 
-typedef struct IMTLD3D11InteropDevice IMTLD3D11InteropDevice;
 #ifndef __d3d11_h__
 typedef struct ID3D11Device ID3D11Device;
 typedef struct ID3D11DeviceContext ID3D11DeviceContext;
 typedef struct ID3D11Texture2D ID3D11Texture2D;
 #endif
-typedef struct ID3D11DeviceContext4 ID3D11DeviceContext4;
-typedef struct ID3D11Fence ID3D11Fence;
+typedef struct IDXGIKeyedMutex IDXGIKeyedMutex;
 #ifndef __d3dcommon_h__
 typedef int D3D_FEATURE_LEVEL;
 #endif
@@ -62,13 +60,22 @@ struct init_params
     NTSTATUS result;
 };
 
+/* Length of a DXMT shared-resource mach service name, including the NUL.
+ * Fixed by DXMT's on-the-wire private runtime data (char[54]) */
+#define OXR_MACH_NAME_LEN 54
+
 struct create_d3d11_session_params
 {
     XrInstance instance;
     XrSystemId system_id;
     XrSession *session;
+    /* in: launchd service name of the MTLSharedEvent behind the session's
+     * keyed-mutex sync carrier, or an empty string for no GPU fence. The unix
+     * side looks it up and opens its own id<MTLSharedEvent> on the same event */
+    char fence_mach_port_name[OXR_MACH_NAME_LEN];
     void *mtl_device;             /* id<MTLDevice>, owned +1 reference returned to caller */
     void *mtl_command_queue;      /* id<MTLCommandQueue>, owned +1 reference returned to caller */
+    uint64_t mtl_shared_event;    /* id<MTLSharedEvent>, owned +1 reference returned to caller */
     XrResult result;
 };
 
@@ -76,6 +83,7 @@ struct release_metal_session_params
 {
     void *mtl_device;             /* id<MTLDevice>, callee consumes caller's +1 reference */
     void *mtl_command_queue;      /* id<MTLCommandQueue>, callee consumes caller's +1 reference */
+    uint64_t mtl_shared_event;    /* id<MTLSharedEvent>, callee consumes caller's +1 reference */
 };
 
 struct export_metal_textures_params
@@ -83,6 +91,10 @@ struct export_metal_textures_params
     XrSwapchain swapchain;
     uint32_t image_count;         /* capacity in, actual count out */
     uint64_t *mtl_textures;       /* borrowed id<MTLTexture> pointers, valid while swapchain lives */
+    /* out: per-image launchd service name the unix side registered the
+     * image's IOSurface mach port under, for DXMT's OpenSharedResource to
+     * look up. image_count entries, NUL-terminated */
+    char (*mach_port_names)[OXR_MACH_NAME_LEN];
     uint32_t width;
     uint32_t height;
     uint32_t array_size;
@@ -122,14 +134,24 @@ struct wine_XrSession
     void *mtl_device;          /* id<MTLDevice>, owned +1 reference */
     void *mtl_command_queue;   /* id<MTLCommandQueue>, owned +1 reference */
 
-    IMTLD3D11InteropDevice *dxmt_device;
     ID3D11Device         *d3d11_device;
     ID3D11DeviceContext  *d3d11_context;
-    ID3D11DeviceContext4 *d3d11_context4;   /* cached to avoid per-release QueryInterface */
 
-    ID3D11Fence *gpu_fence;                 /* keeps the MTLSharedEvent behind mtl_shared_event alive */
-    int64_t gpu_fence_value;                /* monotonic, guarded by swapchain_lock */
-    uint64_t mtl_shared_event;              /* borrowed id<MTLSharedEvent>, valid while gpu_fence lives */
+    /* 1x1 keyed-mutex texture used only as a sync carrier: releasing its
+     * mutex makes DXMT signal mtl_shared_event on its own command queue,
+     * ordered after everything the app has encoded. See d3dkmt_interop.h */
+    ID3D11Texture2D *sync_carrier;
+    IDXGIKeyedMutex *sync_mutex;
+    int64_t gpu_fence_value;                /* signalled value, guarded by swapchain_lock */
+    uint64_t mtl_shared_event;              /* id<MTLSharedEvent>, +1 owned by the unix side */
+    int gpu_fence_checked;                  /* unix side: first-release sanity check done */
+
+    /* Our own D3DKMT adapter/device, used to mint the shared-resource records
+     * that stock DXMT's OpenSharedResource imports. See d3dkmt_interop.h.
+     * kmt_ready is set only once the layout probe has passed */
+    uint32_t kmt_adapter;
+    uint32_t kmt_device;
+    int kmt_ready;
 
     struct list swapchain_list;
 

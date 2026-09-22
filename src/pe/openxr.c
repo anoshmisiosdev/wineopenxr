@@ -17,7 +17,7 @@
 
 #include "bridge.h"
 #include "openxr/openxr_loader_negotiation.h"
-#include "dxmt.h"
+#include "d3dkmt_interop.h"
 #include "formats.h"
 #include "events.h"
 
@@ -308,6 +308,418 @@ static UINT d3d11_bind_flags_from_usage(XrSwapchainUsageFlags flags)
     return ret;
 }
 
+/* ------------------------------------------------------------------------
+ * Metal interop against a STOCK DXMT
+ *
+ * The OpenXR runtime allocates the swapchain images as Metal *shared*
+ * textures and hands us their IOSurface mach ports (registered with launchd
+ * under a unique name by the unix half). To turn one into an ID3D11Texture2D
+ * we mint the same kind of D3DKMT shared-resource record DXMT writes for its
+ * own shared textures, then call the completely standard
+ * ID3D11Device::OpenSharedResource. DXMT reads the name out of the record,
+ * looks the port up and rebuilds the MTLTexture around it.
+ *
+ * The record's layout (struct dxmt_shared_resource_data) is DXMT-private, so
+ * before relying on it we make DXMT write one for a throwaway 4x4 texture and
+ * check every field lands where we expect - see d3dkmt_probe_shared_layout.
+ * ------------------------------------------------------------------------ */
+
+static struct d3dkmt_funcs g_kmt;
+static int g_kmt_load_attempted;
+
+static int d3dkmt_load(void)
+{
+    HMODULE gdi32;
+
+    if (g_kmt_load_attempted)
+        return g_kmt.gdi32 != NULL;
+    g_kmt_load_attempted = 1;
+
+    gdi32 = LoadLibraryA("gdi32.dll");
+    if (!gdi32)
+    {
+        WINE_ERR("LoadLibrary(gdi32.dll) failed\n");
+        return 0;
+    }
+
+    g_kmt.OpenAdapterFromLuid = (void *)GetProcAddress(gdi32, "D3DKMTOpenAdapterFromLuid");
+    g_kmt.OpenAdapterFromGdiDisplayName =
+        (void *)GetProcAddress(gdi32, "D3DKMTOpenAdapterFromGdiDisplayName");
+    g_kmt.CloseAdapter = (void *)GetProcAddress(gdi32, "D3DKMTCloseAdapter");
+    g_kmt.CreateDevice = (void *)GetProcAddress(gdi32, "D3DKMTCreateDevice");
+    g_kmt.DestroyDevice = (void *)GetProcAddress(gdi32, "D3DKMTDestroyDevice");
+    g_kmt.CreateAllocation2 = (void *)GetProcAddress(gdi32, "D3DKMTCreateAllocation2");
+    g_kmt.DestroyAllocation = (void *)GetProcAddress(gdi32, "D3DKMTDestroyAllocation");
+    g_kmt.QueryResourceInfo = (void *)GetProcAddress(gdi32, "D3DKMTQueryResourceInfo");
+    g_kmt.OpenResource2 = (void *)GetProcAddress(gdi32, "D3DKMTOpenResource2");
+    g_kmt.OpenKeyedMutex2 = (void *)GetProcAddress(gdi32, "D3DKMTOpenKeyedMutex2");
+
+    if (!g_kmt.OpenAdapterFromLuid || !g_kmt.CloseAdapter || !g_kmt.CreateDevice ||
+        !g_kmt.DestroyDevice || !g_kmt.CreateAllocation2 || !g_kmt.DestroyAllocation ||
+        !g_kmt.QueryResourceInfo || !g_kmt.OpenResource2 || !g_kmt.OpenKeyedMutex2)
+    {
+        WINE_ERR("gdi32.dll is missing D3DKMT entry points needed for Metal interop\n");
+        FreeLibrary(gdi32);
+        return 0;
+    }
+
+    g_kmt.gdi32 = gdi32;
+    return 1;
+}
+
+static void session_kmt_teardown(struct wine_XrSession *session)
+{
+    session->kmt_ready = 0;
+    if (session->kmt_device && g_kmt.DestroyDevice)
+    {
+        D3DKMT_DESTROYDEVICE destroy;
+        memset(&destroy, 0, sizeof(destroy));
+        destroy.hDevice = session->kmt_device;
+        g_kmt.DestroyDevice(&destroy);
+    }
+    session->kmt_device = 0;
+    if (session->kmt_adapter && g_kmt.CloseAdapter)
+    {
+        D3DKMT_CLOSEADAPTER close_adapter;
+        memset(&close_adapter, 0, sizeof(close_adapter));
+        close_adapter.hAdapter = session->kmt_adapter;
+        g_kmt.CloseAdapter(&close_adapter);
+    }
+    session->kmt_adapter = 0;
+}
+
+/* Open a D3DKMT device. It only has to mint and read shared-resource records,
+ * never render, so any adapter on this Wine will do - gdi32 keeps one resource
+ * namespace per process. Wine's OpenAdapterFromLuid does not recognise the LUID
+ * DXMT synthesises from the Metal registry ID, so try the GDI display name
+ * first. */
+static int session_kmt_init(struct wine_XrSession *session)
+{
+    D3DKMT_CREATEDEVICE create_device;
+    unsigned attempt;
+
+    if (!d3dkmt_load())
+        return 0;
+
+    for (attempt = 0; attempt < 5 && !session->kmt_adapter; attempt++)
+    {
+        if (g_kmt.OpenAdapterFromGdiDisplayName)
+        {
+            D3DKMT_OPENADAPTERFROMGDIDISPLAYNAME open_name;
+            memset(&open_name, 0, sizeof(open_name));
+            lstrcpynW(open_name.DeviceName, L"\\\\.\\DISPLAY1",
+                      sizeof(open_name.DeviceName) / sizeof(WCHAR));
+            if (!g_kmt.OpenAdapterFromGdiDisplayName(&open_name) && open_name.hAdapter)
+            {
+                session->kmt_adapter = open_name.hAdapter;
+                break;
+            }
+        }
+        {
+            IDXGIDevice *dxgi_device = NULL;
+            IDXGIAdapter *dxgi_adapter = NULL;
+            DXGI_ADAPTER_DESC adapter_desc;
+            D3DKMT_OPENADAPTERFROMLUID open_luid;
+
+            if (FAILED(ID3D11Device_QueryInterface(session->d3d11_device, &IID_IDXGIDevice,
+                                                   (void **)&dxgi_device)))
+                break;
+            if (FAILED(IDXGIDevice_GetAdapter(dxgi_device, &dxgi_adapter)))
+            {
+                IDXGIDevice_Release(dxgi_device);
+                break;
+            }
+            IDXGIDevice_Release(dxgi_device);
+            if (FAILED(IDXGIAdapter_GetDesc(dxgi_adapter, &adapter_desc)))
+            {
+                IDXGIAdapter_Release(dxgi_adapter);
+                break;
+            }
+            IDXGIAdapter_Release(dxgi_adapter);
+
+            memset(&open_luid, 0, sizeof(open_luid));
+            open_luid.AdapterLuid = adapter_desc.AdapterLuid;
+            if (!g_kmt.OpenAdapterFromLuid(&open_luid) && open_luid.hAdapter)
+                session->kmt_adapter = open_luid.hAdapter;
+        }
+        if (!session->kmt_adapter)
+            Sleep(50);
+    }
+
+    if (!session->kmt_adapter)
+    {
+        WINE_ERR("could not open a D3DKMT adapter\n");
+        return 0;
+    }
+
+    memset(&create_device, 0, sizeof(create_device));
+    create_device.u.hAdapter = session->kmt_adapter;
+    if (g_kmt.CreateDevice(&create_device) || !create_device.hDevice)
+    {
+        WINE_ERR("D3DKMTCreateDevice failed\n");
+        session_kmt_teardown(session);
+        return 0;
+    }
+    session->kmt_device = create_device.hDevice;
+    session->kmt_ready = 1;
+    return 1;
+}
+
+/* Read back the DXMT private record of a legacy (global-share) shared resource.
+ * D3DKMTQueryResourceInfo only reports sizes; OpenResource2 is what fills the
+ * buffer, and it hands back a resource handle we must destroy again */
+static int d3dkmt_read_shared_record(struct wine_XrSession *session, HANDLE shared,
+                                     struct dxmt_shared_resource_data *out)
+{
+    D3DKMT_QUERYRESOURCEINFO query;
+    D3DKMT_OPENRESOURCE open_resource;
+    D3DDDI_OPENALLOCATIONINFO2 allocation;
+    D3DKMT_DESTROYALLOCATION destroy;
+
+    memset(out, 0, sizeof(*out));
+    memset(&query, 0, sizeof(query));
+    query.hDevice = session->kmt_device;
+    query.hGlobalShare = (D3DKMT_HANDLE)(ULONG_PTR)shared;
+    query.pPrivateRuntimeData = out;
+    query.PrivateRuntimeDataSize = sizeof(*out);
+    if (g_kmt.QueryResourceInfo(&query))
+    {
+        WINE_ERR("D3DKMTQueryResourceInfo failed\n");
+        return 0;
+    }
+    if (query.PrivateRuntimeDataSize != sizeof(*out))
+    {
+        WINE_ERR("DXMT shared-resource record is %u bytes, expected %u; this DXMT "
+                 "build changed its private layout and the bridge cannot drive it\n",
+                 (unsigned)query.PrivateRuntimeDataSize, (unsigned)sizeof(*out));
+        return 0;
+    }
+
+    memset(&open_resource, 0, sizeof(open_resource));
+    memset(&allocation, 0, sizeof(allocation));
+    open_resource.hDevice = session->kmt_device;
+    open_resource.hGlobalShare = (D3DKMT_HANDLE)(ULONG_PTR)shared;
+    open_resource.NumAllocations = 1;
+    open_resource.u.pOpenAllocationInfo2 = &allocation;
+    open_resource.pPrivateRuntimeData = out;
+    open_resource.PrivateRuntimeDataSize = query.PrivateRuntimeDataSize;
+    if (g_kmt.OpenResource2(&open_resource))
+    {
+        WINE_ERR("D3DKMTOpenResource2 failed\n");
+        return 0;
+    }
+
+    memset(&destroy, 0, sizeof(destroy));
+    destroy.hDevice = session->kmt_device;
+    destroy.hResource = open_resource.hResource;
+    g_kmt.DestroyAllocation(&destroy);
+    return 1;
+}
+
+/* Wrap a launchd-registered Metal shared-texture port in a D3DKMT resource and
+ * let stock DXMT import it through ID3D11Device::OpenSharedResource */
+static HRESULT import_shared_mtl_texture(struct wine_XrSession *session,
+                                         const D3D11_TEXTURE2D_DESC1 *desc,
+                                         const char *mach_port_name,
+                                         ID3D11Texture2D **out)
+{
+    struct dxmt_shared_resource_data data;
+    D3DKMT_CREATEALLOCATION create;
+    D3DDDI_ALLOCATIONINFO2 allocation_info;
+    D3DKMT_CREATESTANDARDALLOCATION standard_allocation;
+    D3DDDI_ALLOCATIONINFO system_mem;
+    D3DKMT_DESTROYALLOCATION destroy;
+    HRESULT hr;
+
+    *out = NULL;
+    if (!session->kmt_ready)
+        return E_FAIL;
+    if (!mach_port_name || !mach_port_name[0])
+        return E_INVALIDARG;
+
+    memset(&data, 0, sizeof(data));
+    lstrcpynA(data.mach_port_name, mach_port_name, sizeof(data.mach_port_name));
+    data.dimension = D3D11_RESOURCE_DIMENSION_TEXTURE2D;
+    data.desc.desc2d = *desc;
+    data.mutex_handle = 0;
+
+    /* Mirrors DXMT's own CreateDeviceTextureInternal shared path */
+    memset(&create, 0, sizeof(create));
+    memset(&allocation_info, 0, sizeof(allocation_info));
+    memset(&standard_allocation, 0, sizeof(standard_allocation));
+    memset(&system_mem, 0, sizeof(system_mem));
+
+    create.hDevice = session->kmt_device;
+    create.pPrivateRuntimeData = &data;
+    create.PrivateRuntimeDataSize = sizeof(data);
+    create.Flags.StandardAllocation = 1;
+    create.NumAllocations = 1;
+    create.u2.pAllocationInfo2 = &allocation_info;
+    create.u.pStandardAllocation = &standard_allocation;
+    standard_allocation.Type = D3DKMT_STANDARDALLOCATIONTYPE_EXISTINGHEAP;
+    create.Flags.ExistingSysMem = 1;
+    allocation_info.u.pSystemMem = &system_mem;
+    create.Flags.CreateResource = 1;
+    create.Flags.CreateShared = 1;
+
+    if (g_kmt.CreateAllocation2(&create) || !create.hGlobalShare)
+    {
+        WINE_ERR("D3DKMTCreateAllocation2 failed for %s\n", wine_dbgstr_a(mach_port_name));
+        return E_FAIL;
+    }
+
+    hr = ID3D11Device_OpenSharedResource(session->d3d11_device,
+                                         (HANDLE)(ULONG_PTR)create.hGlobalShare,
+                                         &IID_ID3D11Texture2D, (void **)out);
+
+    /* DXMT's import keeps only the Metal texture (alive via the mach port);
+     * the kernel resource has done its job as a carrier */
+    memset(&destroy, 0, sizeof(destroy));
+    destroy.hDevice = session->kmt_device;
+    destroy.hResource = create.hResource;
+    g_kmt.DestroyAllocation(&destroy);
+
+    return hr;
+}
+
+/* Build the session's GPU sync carrier, and validate DXMT's private record
+ * layout while we are at it.
+ *
+ * A 1x1 D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX texture makes stock DXMT create a
+ * keyed mutex backed by an MTLSharedEvent and write both the texture record and
+ * the mutex's mach service name where D3DKMT can hand them back. Releasing that
+ * mutex encodes a signal of the event on DXMT's queue, ordered after everything
+ * the app encoded - exactly what ID3D11Fence::Signal would have done, except
+ * that shared fences do not work on CrossOver's Wine.
+ *
+ * The record we read here is the same struct we later write for the runtime's
+ * own textures, so checking it field by field is also the layout probe: if a
+ * future DXMT moves anything, this fails loudly at session creation instead of
+ * silently importing garbage */
+static void session_create_sync_carrier(struct wine_XrSession *session,
+                                        char name[OXR_MACH_NAME_LEN])
+{
+    D3D11_TEXTURE2D_DESC desc;
+    ID3D11Texture2D *texture = NULL;
+    IDXGIResource *resource = NULL;
+    IDXGIKeyedMutex *mutex = NULL;
+    HANDLE shared = NULL;
+    struct dxmt_shared_resource_data record;
+    const D3D11_TEXTURE2D_DESC1 *probe;
+    D3DKMT_OPENKEYEDMUTEX2 open_mutex;
+    char mutex_name[OXR_MACH_NAME_LEN];
+    HRESULT hr;
+
+    name[0] = 0;
+
+    memset(&desc, 0, sizeof(desc));
+    desc.Width = 1;
+    desc.Height = 1;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    /* KEYEDMUTEX is mutually exclusive with MISC_SHARED but still yields a
+     * legacy global share handle */
+    desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+
+    hr = ID3D11Device_CreateTexture2D(session->d3d11_device, &desc, NULL, &texture);
+    if (FAILED(hr))
+    {
+        WINE_ERR("sync carrier: CreateTexture2D(KEYEDMUTEX) failed: 0x%08x\n", (unsigned)hr);
+        return;
+    }
+
+    hr = ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIResource, (void **)&resource);
+    if (FAILED(hr))
+    {
+        WINE_ERR("sync carrier: no IDXGIResource: 0x%08x\n", (unsigned)hr);
+        goto fail;
+    }
+    hr = IDXGIResource_GetSharedHandle(resource, &shared);
+    IDXGIResource_Release(resource);
+    resource = NULL;
+    if (FAILED(hr) || !shared)
+    {
+        WINE_ERR("sync carrier: GetSharedHandle failed: 0x%08x\n", (unsigned)hr);
+        goto fail;
+    }
+
+    if (!d3dkmt_read_shared_record(session, shared, &record))
+        goto fail;
+
+    if (!memchr(record.mach_port_name, 0, sizeof(record.mach_port_name)))
+    {
+        WINE_ERR("layout check: mach port name is not NUL-terminated\n");
+        goto fail;
+    }
+    if (record.dimension != D3D11_RESOURCE_DIMENSION_TEXTURE2D)
+    {
+        WINE_ERR("layout check: dimension reads %d, expected TEXTURE2D\n",
+                 (int)record.dimension);
+        goto fail;
+    }
+    probe = &record.desc.desc2d;
+    if (probe->Width != desc.Width || probe->Height != desc.Height ||
+        probe->MipLevels != desc.MipLevels || probe->ArraySize != desc.ArraySize ||
+        probe->Format != desc.Format || probe->SampleDesc.Count != desc.SampleDesc.Count ||
+        probe->Usage != desc.Usage || probe->BindFlags != desc.BindFlags ||
+        probe->MiscFlags != desc.MiscFlags)
+    {
+        WINE_ERR("layout check: desc mismatch (%ux%u mips=%u array=%u fmt=%d "
+                 "usage=%d bind=0x%x misc=0x%x)\n",
+                 (unsigned)probe->Width, (unsigned)probe->Height,
+                 (unsigned)probe->MipLevels, (unsigned)probe->ArraySize,
+                 (int)probe->Format, (int)probe->Usage,
+                 (unsigned)probe->BindFlags, (unsigned)probe->MiscFlags);
+        goto fail;
+    }
+    if (!(record.mutex_handle & 0xc0000000))
+    {
+        WINE_ERR("layout check: keyed mutex handle reads 0x%x\n",
+                 (unsigned)record.mutex_handle);
+        goto fail;
+    }
+
+    /* A keyed mutex's private runtime data is just the NUL-terminated mach
+     * service name of its MTLSharedEvent. Leave our opened handle alone -
+     * DXMT owns the mutex and we only wanted to read the name */
+    memset(mutex_name, 0, sizeof(mutex_name));
+    memset(&open_mutex, 0, sizeof(open_mutex));
+    open_mutex.hSharedHandle = record.mutex_handle;
+    open_mutex.pPrivateRuntimeData = mutex_name;
+    open_mutex.PrivateRuntimeDataSize = sizeof(mutex_name);
+    if (g_kmt.OpenKeyedMutex2(&open_mutex) ||
+        !memchr(mutex_name, 0, sizeof(mutex_name)) || !mutex_name[0])
+    {
+        WINE_ERR("sync carrier: could not read the keyed mutex's shared event name\n");
+        goto fail;
+    }
+
+    hr = ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIKeyedMutex, (void **)&mutex);
+    if (FAILED(hr))
+    {
+        WINE_ERR("sync carrier: no IDXGIKeyedMutex: 0x%08x\n", (unsigned)hr);
+        goto fail;
+    }
+
+    session->sync_carrier = texture;
+    session->sync_mutex = mutex;
+    session->gpu_fence_value = 0;
+    memcpy(name, mutex_name, sizeof(mutex_name));
+    WINE_TRACE("sync carrier ready, shared event %s\n", wine_dbgstr_a(mutex_name));
+    return;
+
+fail:
+    if (resource)
+        IDXGIResource_Release(resource);
+    ID3D11Texture2D_Release(texture);
+    WINE_WARN("running without a GPU release fence; the runtime may read a "
+              "swapchain image before the app has finished rendering it\n");
+}
+
 static void release_imported_d3d11_textures(XrSwapchainImageD3D11KHR *images,
                                             uint32_t count)
 {
@@ -318,15 +730,16 @@ static void release_imported_d3d11_textures(XrSwapchainImageD3D11KHR *images,
 
 static void release_dxmt_refs(struct wine_XrSession *sess)
 {
-    if (sess->d3d11_context4)
+    session_kmt_teardown(sess);
+    if (sess->sync_mutex)
     {
-        sess->d3d11_context4->lpVtbl->Release(sess->d3d11_context4);
-        sess->d3d11_context4 = NULL;
+        IDXGIKeyedMutex_Release(sess->sync_mutex);
+        sess->sync_mutex = NULL;
     }
-    if (sess->dxmt_device)
+    if (sess->sync_carrier)
     {
-        sess->dxmt_device->lpVtbl->Release(sess->dxmt_device);
-        sess->dxmt_device = NULL;
+        ID3D11Texture2D_Release(sess->sync_carrier);
+        sess->sync_carrier = NULL;
     }
     if (sess->d3d11_context)
     {
@@ -362,16 +775,14 @@ static void session_teardown(struct wine_XrSession *session)
     }
     LeaveCriticalSection(&session->swapchain_lock);
 
-    if (session->gpu_fence)
-        ID3D11Fence_Release(session->gpu_fence);
-
     release_dxmt_refs(session);
 
-    if (session->mtl_command_queue || session->mtl_device)
+    if (session->mtl_command_queue || session->mtl_device || session->mtl_shared_event)
     {
         struct release_metal_session_params params = {
             .mtl_device = session->mtl_device,
             .mtl_command_queue = session->mtl_command_queue,
+            .mtl_shared_event = session->mtl_shared_event,
         };
         UNIX_CALL(release_metal_session, &params);
     }
@@ -387,20 +798,10 @@ static XrResult create_session_d3d11(struct wine_XrInstance *wine_instance,
 {
     struct create_d3d11_session_params params;
     NTSTATUS status;
-    HRESULT hr;
 
     if (!binding->device)
     {
         WINE_WARN("D3D11 binding has NULL device\n");
-        return XR_ERROR_GRAPHICS_DEVICE_INVALID;
-    }
-
-    hr = ID3D11Device_QueryInterface(binding->device,
-        &IID_IMTLD3D11InteropDevice, (void **)&wine_session->dxmt_device);
-    if (FAILED(hr))
-    {
-        WINE_ERR("D3D11 device does not support IMTLD3D11InteropDevice "
-                 "(not DXMT?)\n");
         return XR_ERROR_GRAPHICS_DEVICE_INVALID;
     }
 
@@ -409,17 +810,26 @@ static XrResult create_session_d3d11(struct wine_XrInstance *wine_instance,
     ID3D11Device_GetImmediateContext(wine_session->d3d11_device,
                                      &wine_session->d3d11_context);
 
-    /* Cache ID3D11DeviceContext4 so the per-release Signal call does
-     * not hit the DXMT QueryInterface vtable hop. DXMT always
-     * implements ID3D11DeviceContext4 */
-    hr = ID3D11DeviceContext_QueryInterface(wine_session->d3d11_context,
-        &IID_ID3D11DeviceContext4, (void **)&wine_session->d3d11_context4);
-    if (FAILED(hr))
-        wine_session->d3d11_context4 = NULL;
+    /* Swapchain images arrive as Metal shared textures we import through
+     * stock DXMT's OpenSharedResource; without a working D3DKMT path there
+     * is nothing to hand the app */
+    if (!session_kmt_init(wine_session))
+    {
+        WINE_ERR("Metal interop unavailable on this D3D11 device (DXMT missing "
+                 "or incompatible)\n");
+        release_dxmt_refs(wine_session);
+        return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+    }
 
+    memset(&params, 0, sizeof(params));
     params.instance = (XrInstance)wine_instance;
     params.system_id = system_id;
     params.session = &wine_session->host_session;
+
+    /* Plumb the MTLSharedEvent behind the keyed-mutex sync carrier through to
+     * the unix half, so per-release signals land in a native Metal event the
+     * binding queue GPU-waits on before the host reads the swapchain */
+    session_create_sync_carrier(wine_session, params.fence_mach_port_name);
 
     status = UNIX_CALL(create_d3d11_session, &params);
     if (status)
@@ -437,48 +847,16 @@ static XrResult create_session_d3d11(struct wine_XrInstance *wine_instance,
 
     wine_session->mtl_device = params.mtl_device;
     wine_session->mtl_command_queue = params.mtl_command_queue;
+    wine_session->mtl_shared_event = params.mtl_shared_event;
 
-    /* Plumb the MTLSharedEvent through an ID3D11Fence so per-release
-     * Signal calls land in a native Metal event the binding queue
-     * GPU-waits on before the host reads the swapchain */
+    if (wine_session->sync_mutex && !wine_session->mtl_shared_event)
     {
-        ID3D11Device5 *device5 = NULL;
-        hr = ID3D11Device_QueryInterface(wine_session->d3d11_device,
-            &IID_ID3D11Device5, (void **)&device5);
-        if (SUCCEEDED(hr))
-        {
-            ID3D11Fence *fence = NULL;
-            hr = ID3D11Device5_CreateFence(device5, 0, D3D11_FENCE_FLAG_NONE,
-                                           &IID_ID3D11Fence, (void **)&fence);
-            if (SUCCEEDED(hr))
-            {
-                UINT64 mtl_event = 0;
-                hr = wine_session->dxmt_device->lpVtbl->GetFenceSharedEvent(
-                    wine_session->dxmt_device, fence, &mtl_event);
-                if (SUCCEEDED(hr) && mtl_event)
-                {
-                    wine_session->gpu_fence = fence;
-                    wine_session->gpu_fence_value = 0;
-                    wine_session->mtl_shared_event = mtl_event;
-                }
-                else
-                {
-                    WINE_TRACE("GetFenceSharedEvent failed: 0x%08x\n",
-                               (unsigned)hr);
-                    ID3D11Fence_Release(fence);
-                }
-            }
-            else
-            {
-                WINE_TRACE("CreateFence failed: 0x%08x\n", (unsigned)hr);
-            }
-            ID3D11Device5_Release(device5);
-        }
-        else
-        {
-            WINE_TRACE("QueryInterface ID3D11Device5 failed: 0x%08x\n",
-                       (unsigned)hr);
-        }
+        WINE_WARN("the unix half could not open the sync carrier's shared "
+                  "event; running without a GPU release fence\n");
+        IDXGIKeyedMutex_Release(wine_session->sync_mutex);
+        wine_session->sync_mutex = NULL;
+        ID3D11Texture2D_Release(wine_session->sync_carrier);
+        wine_session->sync_carrier = NULL;
     }
 
     return XR_SUCCESS;
@@ -782,13 +1160,17 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
         {
             struct export_metal_textures_params mt_params;
             uint64_t *mtl_textures;
+            char (*mach_port_names)[OXR_MACH_NAME_LEN];
             XrSwapchainImageD3D11KHR *d3d11_images;
             NTSTATUS status;
             uint32_t i;
 
             mtl_textures = calloc(imageCapacityInput, sizeof(*mtl_textures));
-            if (!mtl_textures)
+            mach_port_names = calloc(imageCapacityInput, sizeof(*mach_port_names));
+            if (!mtl_textures || !mach_port_names)
             {
+                free(mtl_textures);
+                free(mach_port_names);
                 LeaveCriticalSection(&wine_session->swapchain_lock);
                 return XR_ERROR_OUT_OF_MEMORY;
             }
@@ -797,6 +1179,7 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
             mt_params.swapchain = swapchain;
             mt_params.image_count = imageCapacityInput;
             mt_params.mtl_textures = mtl_textures;
+            mt_params.mach_port_names = mach_port_names;
 
             status = UNIX_CALL(export_metal_textures, &mt_params);
             if (status)
@@ -804,6 +1187,7 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
                 WINE_ERR("export_metal_textures unix call failed: 0x%x\n",
                          (unsigned)status);
                 free(mtl_textures);
+                free(mach_port_names);
                 LeaveCriticalSection(&wine_session->swapchain_lock);
                 return XR_ERROR_RUNTIME_FAILURE;
             }
@@ -811,6 +1195,7 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
             if (mt_params.result != XR_SUCCESS)
             {
                 free(mtl_textures);
+                free(mach_port_names);
                 if (mt_params.result == XR_ERROR_SIZE_INSUFFICIENT)
                     *imageCountOutput = mt_params.image_count;
                 LeaveCriticalSection(&wine_session->swapchain_lock);
@@ -821,6 +1206,7 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
             if (!d3d11_images)
             {
                 free(mtl_textures);
+                free(mach_port_names);
                 LeaveCriticalSection(&wine_session->swapchain_lock);
                 return XR_ERROR_OUT_OF_MEMORY;
             }
@@ -834,9 +1220,9 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
                 memset(&desc, 0, sizeof(desc));
                 desc.Width = mt_params.width;
                 desc.Height = mt_params.height;
-                /* Must match the MTLTexture's mipmapLevelCount; Monado's Metal
-                 * allocator honors create_info.mipCount, and DXMT's
-                 * ImportMTLTexture2D rejects the import on any mismatch */
+                /* Must match the MTLTexture's mipmapLevelCount: the desc is
+                 * what DXMT builds its D3D11-side view descriptors from, so a
+                 * mismatch would make it address levels the image does not have */
                 desc.MipLevels = wine_swapchain->create_info.mipCount
                     ? wine_swapchain->create_info.mipCount : 1;
                 desc.ArraySize = mt_params.array_size ? mt_params.array_size : 1;
@@ -858,15 +1244,16 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
                         : (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
                 }
 
-                hr = wine_session->dxmt_device->lpVtbl->ImportMTLTexture2D(
-                    wine_session->dxmt_device, &desc, mtl_textures[i], &texture);
+                hr = import_shared_mtl_texture(wine_session, &desc,
+                                               mach_port_names[i], &texture);
                 if (FAILED(hr))
                 {
-                    WINE_ERR("ImportMTLTexture2D failed for image %u: 0x%08x\n",
+                    WINE_ERR("importing swapchain image %u failed: 0x%08x\n",
                              i, (unsigned)hr);
                     release_imported_d3d11_textures(d3d11_images, i);
                     free(d3d11_images);
                     free(mtl_textures);
+                    free(mach_port_names);
                     LeaveCriticalSection(&wine_session->swapchain_lock);
                     return XR_ERROR_RUNTIME_FAILURE;
                 }
@@ -881,6 +1268,7 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
             }
 
             free(mtl_textures);
+            free(mach_port_names);
 
             wine_swapchain->image_count = mt_params.image_count;
             wine_swapchain->images = (XrSwapchainImageBaseHeader *)d3d11_images;
@@ -923,22 +1311,25 @@ XrResult WINAPI xrReleaseSwapchainImage(XrSwapchain swapchain,
     };
     NTSTATUS status;
 
-    if (wine_session->gpu_fence && wine_session->d3d11_context4) {
-        LONGLONG value;
+    /* Take and drop the sync carrier's keyed mutex. DXMT encodes a wait for the
+     * value we last signalled and then a signal of value+1, both on its own
+     * queue behind everything the app has encoded - the stock-DXMT equivalent
+     * of ID3D11DeviceContext4::Signal on a shared fence. Values are a plain
+     * count because nothing else ever touches this mutex */
+    if (wine_session->sync_mutex) {
         HRESULT hr;
 
         EnterCriticalSection(&wine_session->swapchain_lock);
-        value = ++wine_session->gpu_fence_value;
-        hr = wine_session->d3d11_context4->lpVtbl->Signal(
-            wine_session->d3d11_context4,
-            (ID3D11Fence *)wine_session->gpu_fence, value);
+        hr = IDXGIKeyedMutex_AcquireSync(wine_session->sync_mutex, 0, 1000);
+        if (SUCCEEDED(hr)) {
+            hr = IDXGIKeyedMutex_ReleaseSync(wine_session->sync_mutex, 0);
+            if (SUCCEEDED(hr))
+                params.gpu_fence_value = (uint64_t)++wine_session->gpu_fence_value;
+        }
         LeaveCriticalSection(&wine_session->swapchain_lock);
 
-        if (SUCCEEDED(hr)) {
-            params.gpu_fence_value = (uint64_t)value;
-        } else {
-            WINE_WARN("GPU fence signal failed: 0x%08x\n", (unsigned)hr);
-        }
+        if (FAILED(hr))
+            WINE_WARN("sync carrier signal failed: 0x%08x\n", (unsigned)hr);
     }
 
     status = UNIX_CALL(xrReleaseSwapchainImage, &params);

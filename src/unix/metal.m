@@ -6,6 +6,7 @@
 #import <Metal/Metal.h>
 
 #include <stdint.h>
+#include <unistd.h>
 
 #include "wine/debug_slim.h"
 
@@ -37,5 +38,29 @@ void encode_gpu_wait(void *mtl_command_queue,
 
         WINE_TRACE("encoded wait for fence value %llu\n",
                    (unsigned long long)fence_value);
+    }
+}
+
+/* Wait (on the CPU) until the shared event reaches `fence_value`, up to
+ * timeout_ms. Used once per session to sanity-check that the PE side's
+ * release counter really tracks the event DXMT signals */
+int gpu_fence_value_reached(uint64_t mtl_shared_event,
+                            uint64_t fence_value,
+                            unsigned timeout_ms)
+{
+    @autoreleasepool {
+        id<MTLSharedEvent> event = (id<MTLSharedEvent>)(void *)(uintptr_t)mtl_shared_event;
+        unsigned waited = 0;
+
+        if (!event)
+            return 0;
+
+        while (event.signaledValue < fence_value) {
+            if (waited >= timeout_ms)
+                return 0;
+            usleep(1000);
+            waited++;
+        }
+        return 1;
     }
 }
