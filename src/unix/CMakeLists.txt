@@ -3,6 +3,7 @@ add_library(wineopenxr_unix SHARED
     thunks.c
     session.m
     metal.m
+    dmsubst.m
 )
 
 target_include_directories(wineopenxr_unix PRIVATE

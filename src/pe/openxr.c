@@ -10,7 +10,7 @@
 
 #include <windows.h>
 #include <initguid.h>
-#include <d3d11.h>
+#include <d3d11_4.h>
 #include <dxgi.h>
 
 #include <wine/debug.h>
@@ -20,6 +20,7 @@
 #include "d3dkmt_interop.h"
 #include "formats.h"
 #include "events.h"
+#include "dmsubst.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(openxr);
 
@@ -720,6 +721,282 @@ fail:
               "swapchain image before the app has finished rendering it\n");
 }
 
+/* ==== PROTOTYPE: D3DMetal Metal-texture substitution (see dmsubst.h) ==== */
+
+static int dmsubst_call(struct dmsubst_params *p)
+{
+    NTSTATUS status = UNIX_CALL(dmsubst, p);
+    return status ? -1 : p->status;
+}
+
+/* Test hooks, exported for test/d3d11_d3dmetal_subst_test.cpp only */
+int WINAPI wineopenxr_proto_dmsubst(struct dmsubst_params *p)
+{
+    return dmsubst_call(p);
+}
+
+uint64_t WINAPI wineopenxr_proto_swapchain_mtl_texture(XrSwapchain swapchain, uint32_t index)
+{
+    struct wine_XrSwapchain *wine_swapchain = wine_swapchain_from_handle(swapchain);
+    if (!wine_swapchain || !wine_swapchain->mtl_textures || index >= wine_swapchain->image_count)
+        return 0;
+    return wine_swapchain->mtl_textures[index];
+}
+
+/* Test hook: the session's release event (id<MTLSharedEvent>) and last value */
+uint64_t WINAPI wineopenxr_proto_session_event(XrSession session, uint64_t *value)
+{
+    struct wine_XrSession *wine_session = wine_session_from_handle(session);
+    if (value)
+        *value = (uint64_t)wine_session->gpu_fence_value;
+    return wine_session->mtl_shared_event;
+}
+
+/* Does this PE module import winemetal.dll (DXMT's d3d11 does; D3DMetal's does
+ * not - it is a thin PE over a unix lib that loads D3DMetal.framework)? */
+static int module_imports_winemetal(HMODULE module)
+{
+    const BYTE *base = (const BYTE *)module;
+    const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)base;
+    const IMAGE_NT_HEADERS *nt;
+    const IMAGE_DATA_DIRECTORY *dir;
+    const IMAGE_IMPORT_DESCRIPTOR *imp;
+
+    if (!module || dos->e_magic != IMAGE_DOS_SIGNATURE)
+        return 0;
+    nt = (const IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
+    dir = &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dir->VirtualAddress)
+        return 0;
+    for (imp = (const IMAGE_IMPORT_DESCRIPTOR *)(base + dir->VirtualAddress); imp->Name; imp++)
+        if (!lstrcmpiA((const char *)(base + imp->Name), "winemetal.dll"))
+            return 1;
+    return 0;
+}
+
+/* Pick the swapchain-image path for this device: 1 = D3DMetal substitution,
+ * 0 = the existing DXMT OpenSharedResource path. Anything that is not clearly
+ * D3DMetal stays on DXMT, so DXMT behaviour is unchanged. Override with
+ * OXR_BRIDGE_D3D11_BACKEND=dxmt|d3dmetal */
+static int session_wants_dmsubst(struct wine_XrSession *session)
+{
+    struct dmsubst_params p;
+    const char *env = getenv("OXR_BRIDGE_D3D11_BACKEND");
+    HMODULE module = NULL;
+    char path[MAX_PATH] = "?";
+    int dxmt_device;
+
+    if (env && !strcmp(env, "dxmt"))
+        return 0;
+
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       (LPCSTR)session->d3d11_device->lpVtbl->CreateTexture2D, &module);
+    if (module)
+        GetModuleFileNameA(module, path, sizeof(path));
+    dxmt_device = module_imports_winemetal(module);
+
+    memset(&p, 0, sizeof(p));
+    p.op = DMSUBST_OP_DETECT;
+    dmsubst_call(&p);
+
+    WINE_FIXME("D3D11 device vtable in %s (imports winemetal: %d); process has D3DMetal=%d DXMT=%d\n",
+               path, dxmt_device, !!(p.detect_flags & DMSUBST_DETECT_D3DMETAL),
+               !!(p.detect_flags & DMSUBST_DETECT_DXMT));
+
+    if (env && !strcmp(env, "d3dmetal"))
+        return 1;
+    return !dxmt_device && (p.detect_flags & DMSUBST_DETECT_D3DMETAL);
+}
+
+/* Create a D3D11 texture whose Metal texture IS the runtime's swapchain image:
+ * arm the unix-side swizzle, let D3DMetal run its normal CreateTexture2D, and
+ * the MTLTexture it allocates on this thread is replaced with mtl_texture. PE
+ * and unix code share the OS thread under Wine, so the unix-side thread-local
+ * arm is visible to D3DMetal's (unix-side) allocation */
+static HRESULT create_substituted_texture(struct wine_XrSession *session,
+                                          const D3D11_TEXTURE2D_DESC1 *desc1,
+                                          uint64_t mtl_texture, ID3D11Texture2D **out,
+                                          uint64_t *control_texture)
+{
+    D3D11_TEXTURE2D_DESC desc;
+    struct dmsubst_params p;
+    HRESULT hr;
+    int control;
+
+    *out = NULL;
+    desc.Width = desc1->Width;
+    desc.Height = desc1->Height;
+    desc.MipLevels = desc1->MipLevels;
+    desc.ArraySize = desc1->ArraySize;
+    desc.Format = desc1->Format;
+    desc.SampleDesc = desc1->SampleDesc;
+    desc.Usage = desc1->Usage;
+    desc.BindFlags = desc1->BindFlags;
+    desc.CPUAccessFlags = desc1->CPUAccessFlags;
+    desc.MiscFlags = desc1->MiscFlags;
+
+    /* OXR_DMSUBST_CONTROL=1 (diagnostic): do NOT substitute; keep D3DMetal's
+     * own texture so the dump shows what the app rendered without us */
+    control = getenv("OXR_DMSUBST_CONTROL") && atoi(getenv("OXR_DMSUBST_CONTROL"));
+
+    memset(&p, 0, sizeof(p));
+    p.op = DMSUBST_OP_ARM;
+    p.mtl_texture = mtl_texture;
+    if (control)
+        p.flags = DMSUBST_ARM_PROBE | DMSUBST_ARM_CAPTURE;
+    if (dmsubst_call(&p))
+        return E_FAIL;
+
+    hr = ID3D11Device_CreateTexture2D(session->d3d11_device, &desc, NULL, out);
+
+    memset(&p, 0, sizeof(p));
+    p.op = DMSUBST_OP_DISARM;
+    dmsubst_call(&p);
+    if (control)
+    {
+        WINE_FIXME("CONTROL: not substituted; D3DMetal's own texture 0x%llx\n",
+                   (unsigned long long)p.created_texture);
+        if (control_texture)
+            *control_texture = p.created_texture;
+        return hr;
+    }
+
+    WINE_FIXME("substitution: hr=0x%08x captured=%u seen=%u (any thread %u) via %s, "
+               "D3DMetal asked fmt=%u type=%u %ux%u arr=%u usage=0x%llx storage=%u%s\n",
+               (unsigned)hr, p.captured, p.seen, p.global_seen, p.where, p.desc_pixel_format,
+               p.desc_texture_type, p.desc_width, p.desc_height, p.desc_array_length,
+               (unsigned long long)p.desc_usage, p.desc_storage_mode,
+               p.result_is_view ? " (handed a view)" : "");
+
+    if (SUCCEEDED(hr) && !p.captured)
+    {
+        WINE_ERR("D3DMetal did not create the swapchain texture through a hooked "
+                 "Metal selector on this thread; cannot substitute\n");
+        if (*out)
+            ID3D11Texture2D_Release(*out);
+        *out = NULL;
+        return E_FAIL;
+    }
+    return hr;
+}
+
+/* Correct-but-slow release sync: submit everything the app encoded and wait
+ * on the CPU for it to finish on D3DMetal's queue, so the runtime's queue
+ * cannot read the image early. A GPU-side sync needs an MTLSharedEvent
+ * signalled on D3DMetal's (MTL4) queue - D3DMetal refuses shared fences */
+static void dmsubst_release_sync(struct wine_XrSession *session)
+{
+    ID3D11Query *query = session->dms_query;
+    ID3D11DeviceContext *ctx = session->d3d11_context;
+    ULONGLONG start;
+    LARGE_INTEGER t0;
+    BOOL done = FALSE;
+    HRESULT hr;
+
+    if (!query)
+    {
+        D3D11_QUERY_DESC qd = { D3D11_QUERY_EVENT, 0 };
+        if (FAILED(ID3D11Device_CreateQuery(session->d3d11_device, &qd, &query)))
+        {
+            ID3D11DeviceContext_Flush(ctx);
+            return;
+        }
+        session->dms_query = query;
+    }
+
+    QueryPerformanceCounter(&t0);
+    ID3D11DeviceContext_End(ctx, (ID3D11Asynchronous *)query);
+    ID3D11DeviceContext_Flush(ctx);
+    start = GetTickCount64();
+    for (;;)
+    {
+        hr = ID3D11DeviceContext_GetData(ctx, (ID3D11Asynchronous *)query, &done, sizeof(done), 0);
+        if (hr == S_OK && done)
+            break;
+        if (FAILED(hr) || GetTickCount64() - start > 1000)
+        {
+            WINE_WARN("release sync: event query not done after %llums (hr 0x%08x)\n",
+                      (unsigned long long)(GetTickCount64() - start), (unsigned)hr);
+            break;
+        }
+        SwitchToThread();
+    }
+
+    /* prototype instrumentation: what the CPU wait costs */
+    {
+        static LONGLONG total, worst;
+        static unsigned count;
+        LARGE_INTEGER t1, freq;
+        LONGLONG us;
+        QueryPerformanceCounter(&t1);
+        QueryPerformanceFrequency(&freq);
+        us = (t1.QuadPart - t0.QuadPart) * 1000000 / freq.QuadPart;
+        total += us;
+        if (us > worst)
+            worst = us;
+        if (++count % 180 == 0)
+        {
+            WINE_FIXME("release sync (Flush + CPU wait on event query): avg %lld us, worst %lld us over %u releases\n",
+                       total / 180, worst, 180u);
+            total = worst = 0;
+        }
+    }
+}
+
+/* GPU release sync for the D3DMetal path. D3DMetal backs ID3D11Fence with a
+ * plain MTLEvent created synchronously inside CreateFence; arming the swizzle
+ * makes that an MTLSharedEvent we keep. ID3D11DeviceContext4::Signal then has
+ * D3DMetal signal it on its own queue after everything encoded before it, and
+ * the unix half GPU-waits on it on the runtime's queue - the same
+ * encode_gpu_wait path the DXMT keyed-mutex carrier feeds. Returns the
+ * id<MTLSharedEvent> (+1) or 0 to fall back to the CPU wait */
+static uint64_t dmsubst_create_fence(struct wine_XrSession *session)
+{
+    const char *env = getenv("OXR_DMSUBST_SYNC");
+    ID3D11Device5 *dev5 = NULL;
+    ID3D11DeviceContext4 *ctx4 = NULL;
+    ID3D11Fence *fence = NULL;
+    struct dmsubst_params p;
+    HRESULT hr;
+
+    if (env && !strcmp(env, "cpu"))
+        return 0;
+    if (FAILED(ID3D11Device_QueryInterface(session->d3d11_device, &IID_ID3D11Device5, (void **)&dev5)))
+        return 0;
+    if (FAILED(ID3D11DeviceContext_QueryInterface(session->d3d11_context, &IID_ID3D11DeviceContext4,
+                                                  (void **)&ctx4)))
+    {
+        ID3D11Device5_Release(dev5);
+        return 0;
+    }
+
+    memset(&p, 0, sizeof(p));
+    p.op = DMSUBST_OP_ARM;
+    p.flags = DMSUBST_ARM_PROBE | DMSUBST_ARM_EVENT_SHARED;
+    dmsubst_call(&p);
+    hr = ID3D11Device5_CreateFence(dev5, 0, D3D11_FENCE_FLAG_NONE, &IID_ID3D11Fence, (void **)&fence);
+    memset(&p, 0, sizeof(p));
+    p.op = DMSUBST_OP_DISARM;
+    dmsubst_call(&p);
+    ID3D11Device5_Release(dev5);
+
+    if (FAILED(hr) || !fence || !p.event)
+    {
+        WINE_WARN("could not capture a Metal event behind ID3D11Fence (hr 0x%08x, event 0x%llx); "
+                  "falling back to the CPU release wait\n", (unsigned)hr, (unsigned long long)p.event);
+        if (fence)
+            ID3D11Fence_Release(fence);
+        ID3D11DeviceContext4_Release(ctx4);
+        return 0;
+    }
+    session->dms_fence = fence;
+    session->dms_ctx4 = ctx4;
+    WINE_FIXME("GPU release sync: ID3D11Fence backed by MTLSharedEvent 0x%llx (via %s)\n",
+               (unsigned long long)p.event, p.where);
+    return p.event;
+}
+
 static void release_imported_d3d11_textures(XrSwapchainImageD3D11KHR *images,
                                             uint32_t count)
 {
@@ -731,6 +1008,21 @@ static void release_imported_d3d11_textures(XrSwapchainImageD3D11KHR *images,
 static void release_dxmt_refs(struct wine_XrSession *sess)
 {
     session_kmt_teardown(sess);
+    if (sess->dms_fence)
+    {
+        ID3D11Fence_Release((ID3D11Fence *)sess->dms_fence);
+        sess->dms_fence = NULL;
+    }
+    if (sess->dms_ctx4)
+    {
+        ID3D11DeviceContext4_Release((ID3D11DeviceContext4 *)sess->dms_ctx4);
+        sess->dms_ctx4 = NULL;
+    }
+    if (sess->dms_query)
+    {
+        ID3D11Query_Release((ID3D11Query *)sess->dms_query);
+        sess->dms_query = NULL;
+    }
     if (sess->sync_mutex)
     {
         IDXGIKeyedMutex_Release(sess->sync_mutex);
@@ -771,6 +1063,7 @@ static void session_teardown(struct wine_XrSession *session)
             release_imported_d3d11_textures((XrSwapchainImageD3D11KHR *)swapchain->images,
                                             swapchain->image_count);
         free(swapchain->images);
+        free(swapchain->mtl_textures);
         free(swapchain);
     }
     LeaveCriticalSection(&session->swapchain_lock);
@@ -810,10 +1103,22 @@ static XrResult create_session_d3d11(struct wine_XrInstance *wine_instance,
     ID3D11Device_GetImmediateContext(wine_session->d3d11_device,
                                      &wine_session->d3d11_context);
 
+    /* PROTOTYPE: on D3DMetal, swapchain images are made by substituting the
+     * runtime's MTLTextures into D3DMetal's own texture creation instead */
+    if (session_wants_dmsubst(wine_session))
+    {
+        struct dmsubst_params p;
+        memset(&p, 0, sizeof(p));
+        p.op = DMSUBST_OP_INSTALL;
+        dmsubst_call(&p);
+        wine_session->dmsubst = 1;
+        WINE_FIXME("PROTOTYPE: D3DMetal device; swapchain images via Metal texture substitution\n");
+    }
+
     /* Swapchain images arrive as Metal shared textures we import through
      * stock DXMT's OpenSharedResource; without a working D3DKMT path there
      * is nothing to hand the app */
-    if (!session_kmt_init(wine_session))
+    if (!wine_session->dmsubst && !session_kmt_init(wine_session))
     {
         WINE_ERR("Metal interop unavailable on this D3D11 device (DXMT missing "
                  "or incompatible)\n");
@@ -829,7 +1134,8 @@ static XrResult create_session_d3d11(struct wine_XrInstance *wine_instance,
     /* Plumb the MTLSharedEvent behind the keyed-mutex sync carrier through to
      * the unix half, so per-release signals land in a native Metal event the
      * binding queue GPU-waits on before the host reads the swapchain */
-    session_create_sync_carrier(wine_session, params.fence_mach_port_name);
+    if (!wine_session->dmsubst)
+        session_create_sync_carrier(wine_session, params.fence_mach_port_name);
 
     status = UNIX_CALL(create_d3d11_session, &params);
     if (status)
@@ -848,6 +1154,8 @@ static XrResult create_session_d3d11(struct wine_XrInstance *wine_instance,
     wine_session->mtl_device = params.mtl_device;
     wine_session->mtl_command_queue = params.mtl_command_queue;
     wine_session->mtl_shared_event = params.mtl_shared_event;
+    if (wine_session->dmsubst)
+        wine_session->mtl_shared_event = dmsubst_create_fence(wine_session);
 
     if (wine_session->sync_mutex && !wine_session->mtl_shared_event)
     {
@@ -1102,6 +1410,7 @@ XrResult WINAPI xrDestroySwapchain(XrSwapchain swapchain)
         release_imported_d3d11_textures((XrSwapchainImageD3D11KHR *)wine_swapchain->images,
                                         wine_swapchain->image_count);
     free(wine_swapchain->images);
+    free(wine_swapchain->mtl_textures);
     free(wine_swapchain);
 
     if (status)
@@ -1179,7 +1488,9 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
             mt_params.swapchain = swapchain;
             mt_params.image_count = imageCapacityInput;
             mt_params.mtl_textures = mtl_textures;
-            mt_params.mach_port_names = mach_port_names;
+            /* The D3DMetal path needs no mach ports: the runtime's textures
+             * are used in-process as they are */
+            mt_params.mach_port_names = wine_session->dmsubst ? NULL : mach_port_names;
 
             status = UNIX_CALL(export_metal_textures, &mt_params);
             if (status)
@@ -1244,8 +1555,13 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
                         : (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
                 }
 
-                hr = import_shared_mtl_texture(wine_session, &desc,
-                                               mach_port_names[i], &texture);
+                if (wine_session->dmsubst)
+                    hr = create_substituted_texture(wine_session, &desc,
+                                                    mtl_textures[i], &texture,
+                                                    &mtl_textures[i]);
+                else
+                    hr = import_shared_mtl_texture(wine_session, &desc,
+                                                   mach_port_names[i], &texture);
                 if (FAILED(hr))
                 {
                     WINE_ERR("importing swapchain image %u failed: 0x%08x\n",
@@ -1267,9 +1583,9 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
                            texture, (unsigned long long)mtl_textures[i], i);
             }
 
-            free(mtl_textures);
             free(mach_port_names);
 
+            wine_swapchain->mtl_textures = mtl_textures;
             wine_swapchain->image_count = mt_params.image_count;
             wine_swapchain->images = (XrSwapchainImageBaseHeader *)d3d11_images;
         }
@@ -1330,6 +1646,59 @@ XrResult WINAPI xrReleaseSwapchainImage(XrSwapchain swapchain,
 
         if (FAILED(hr))
             WINE_WARN("sync carrier signal failed: 0x%08x\n", (unsigned)hr);
+    }
+
+    /* PROTOTYPE D3DMetal path: signal the substituted fence event on
+     * D3DMetal's queue (GPU sync), or CPU-wait for the GPU without one */
+    if (wine_session->dmsubst)
+    {
+        if (wine_session->dms_fence && wine_session->mtl_shared_event)
+        {
+            HRESULT hr;
+            EnterCriticalSection(&wine_session->swapchain_lock);
+            hr = ID3D11DeviceContext4_Signal((ID3D11DeviceContext4 *)wine_session->dms_ctx4,
+                                             (ID3D11Fence *)wine_session->dms_fence,
+                                             (UINT64)(wine_session->gpu_fence_value + 1));
+            if (SUCCEEDED(hr))
+            {
+                params.gpu_fence_value = (uint64_t)++wine_session->gpu_fence_value;
+                ID3D11DeviceContext_Flush(wine_session->d3d11_context);
+            }
+            LeaveCriticalSection(&wine_session->swapchain_lock);
+            if (FAILED(hr))
+            {
+                WINE_WARN("fence signal failed: 0x%08x; CPU-waiting instead\n", (unsigned)hr);
+                dmsubst_release_sync(wine_session);
+            }
+        }
+        else
+            dmsubst_release_sync(wine_session);
+    }
+
+    /* PROTOTYPE debug: OXR_DMSUBST_DUMP_AT=N writes every image of the swapchain
+     * released N-th (both slices) to /tmp as PPM, read on the Metal side
+     * after a GPU wait on the release event */
+    if (wine_swapchain->mtl_textures)
+    {
+        static LONG releases;
+        const char *at = getenv("OXR_DMSUBST_DUMP_AT");
+        if (at && InterlockedIncrement(&releases) == atoi(at))
+        {
+            uint32_t i, s;
+            for (i = 0; i < wine_swapchain->image_count; i++)
+                for (s = 0; s < (wine_swapchain->create_info.arraySize ? wine_swapchain->create_info.arraySize : 1); s++)
+                {
+                    struct dmsubst_params p;
+                    memset(&p, 0, sizeof(p));
+                    p.op = DMSUBST_OP_DUMP;
+                    p.mtl_texture = wine_swapchain->mtl_textures[i];
+                    p.slice = s;
+                    p.event = wine_session->mtl_shared_event;
+                    p.event_value = params.gpu_fence_value;
+                    snprintf(p.where, sizeof(p.where), "/tmp/oxr_dmsubst_%p_%u_%u.ppm", (void *)wine_swapchain, i, s);
+                    dmsubst_call(&p);
+                }
+        }
     }
 
     status = UNIX_CALL(xrReleaseSwapchainImage, &params);

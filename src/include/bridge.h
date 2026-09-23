@@ -153,6 +153,18 @@ struct wine_XrSession
     uint32_t kmt_device;
     int kmt_ready;
 
+    /* PROTOTYPE (dmsubst.h): nonzero when the app's D3D11 device is D3DMetal's
+     * and swapchain images are D3DMetal textures substituted with the runtime's
+     * own MTLTextures. dms_query is an ID3D11Query (D3D11_QUERY_EVENT) the PE
+     * side CPU-waits on at release time: the correct-but-slow sync.
+     * dms_fence/dms_ctx4 (ID3D11Fence / ID3D11DeviceContext4) are the GPU sync:
+     * D3DMetal's fence is backed by an MTLSharedEvent we substituted into
+     * CreateFence, stored in mtl_shared_event below */
+    int dmsubst;
+    void *dms_query;
+    void *dms_fence;
+    void *dms_ctx4;
+
     struct list swapchain_list;
 
 #ifdef _WIN32
@@ -182,6 +194,8 @@ struct wine_XrSwapchain
 
     XrSwapchainImageBaseHeader *images;
     uint32_t image_count;
+    /* PROTOTYPE: the runtime's id<MTLTexture> per image (borrowed) */
+    uint64_t *mtl_textures;
 };
 
 static inline struct wine_XrInstance *wine_instance_from_handle(XrInstance handle)

@@ -15,6 +15,7 @@ enum unix_call
     unix_create_d3d11_session,
     unix_release_metal_session,
     unix_export_metal_textures,
+    unix_dmsubst,
     unix_xrAcquireSwapchainImage,
     unix_xrApplyHapticFeedback,
     unix_xrAttachSessionActionSets,

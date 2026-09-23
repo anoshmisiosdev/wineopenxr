@@ -25,6 +25,7 @@ extern NTSTATUS wine_init(void *args);
 extern NTSTATUS wine_create_d3d11_session(void *args);
 extern NTSTATUS wine_release_metal_session(void *args);
 extern NTSTATUS wine_export_metal_textures(void *args);
+extern NTSTATUS wine_dmsubst(void *args);
 extern NTSTATUS wine_xrConvertTimeToWin32PerformanceCounterKHR(void *args);
 extern NTSTATUS wine_xrConvertWin32PerformanceCounterToTimeKHR(void *args);
 extern NTSTATUS wine_xrCreateInstance(void *args);
@@ -826,6 +827,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     wine_create_d3d11_session,
     wine_release_metal_session,
     wine_export_metal_textures,
+    wine_dmsubst,
     thunk_xrAcquireSwapchainImage,
     thunk_xrApplyHapticFeedback,
     thunk_xrAttachSessionActionSets,

@@ -1,2 +1,5 @@
 EXPORTS
 xrNegotiateLoaderRuntimeInterface
+wineopenxr_proto_dmsubst
+wineopenxr_proto_swapchain_mtl_texture
+wineopenxr_proto_session_event

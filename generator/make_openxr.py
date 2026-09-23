@@ -111,6 +111,7 @@ CUSTOM_UNIX_CALLS = (
     "create_d3d11_session",
     "release_metal_session",
     "export_metal_textures",
+    "dmsubst",
 )
 
 UNSUPPORTED_TYPES = frozenset({"wchar_t"})
