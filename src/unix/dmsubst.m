@@ -372,6 +372,8 @@ static void class_swizzle_buffer(id buf);
 static void class_swizzle_resset(id set);
 static void class_swizzle_mtl4q(id q);
 static void class_swizzle_classicq(id q);
+static void class_swizzle_cb(id cb);
+static void class_swizzle_texview(id tex);
 
 static id swz_dev_newtex(id self, SEL _cmd, MTLTextureDescriptor *desc)
 {
@@ -383,6 +385,7 @@ static id swz_dev_newtex(id self, SEL _cmd, MTLTextureDescriptor *desc)
     tex = orig ? ((id (*)(id, SEL, MTLTextureDescriptor *))orig)(self, _cmd, desc) : nil;
     if (t_arm.armed && t_arm.capture && !t_arm.created && tex)
         t_arm.created = [tex retain];
+    class_swizzle_texview(tex);
     return tex;
 }
 
@@ -628,22 +631,281 @@ static void note_classic_cb(id q, const char *how, void *ret)
 static id swz_q_cb(id self, SEL _cmd)
 {
     IMP orig = ORIG(self, _cmd);
+    id cb;
     note_classic_cb(self, "commandBuffer", __builtin_return_address(0));
-    return orig ? ((id (*)(id, SEL))orig)(self, _cmd) : nil;
+    cb = orig ? ((id (*)(id, SEL))orig)(self, _cmd) : nil;
+    class_swizzle_cb(cb);
+    return cb;
 }
 
 static id swz_q_cb_unret(id self, SEL _cmd)
 {
     IMP orig = ORIG(self, _cmd);
+    id cb;
     note_classic_cb(self, "commandBufferWithUnretainedReferences", __builtin_return_address(0));
-    return orig ? ((id (*)(id, SEL))orig)(self, _cmd) : nil;
+    cb = orig ? ((id (*)(id, SEL))orig)(self, _cmd) : nil;
+    class_swizzle_cb(cb);
+    return cb;
 }
 
 static id swz_q_cb_desc(id self, SEL _cmd, id desc)
 {
     IMP orig = ORIG(self, _cmd);
+    id cb;
     note_classic_cb(self, "commandBufferWithDescriptor:", __builtin_return_address(0));
-    return orig ? ((id (*)(id, SEL, id))orig)(self, _cmd, desc) : nil;
+    cb = orig ? ((id (*)(id, SEL, id))orig)(self, _cmd, desc) : nil;
+    class_swizzle_cb(cb);
+    return cb;
+}
+
+/* ---- render-pass / texture-view trace (OXR_DMSUBST_RPTRACE=1) -------------
+ * Diagnostic for layered (render-target-array-index) rendering: logs the
+ * render pass D3DMetal encodes whenever an attachment is an array or MSAA
+ * texture, and the texture views it makes of such textures */
+
+static int rptrace(void)
+{
+    static int level = -1;
+    if (level < 0)
+    {
+        const char *e = getenv("OXR_DMSUBST_RPTRACE");
+        level = e && *e ? atoi(e) : 0;
+    }
+    return level;
+}
+
+static int tex_interesting(id<MTLTexture> t)
+{
+    return t && (t.textureType == MTLTextureType2DArray || t.textureType == MTLTextureType2DMultisampleArray ||
+                 t.textureType == MTLTextureType2DMultisample || t.arrayLength > 1 ||
+                 (t.parentTexture && t.parentTexture.arrayLength > 1));
+}
+
+static const char *tex_str(id<MTLTexture> t, char *b, size_t n)
+{
+    if (!t) { snprintf(b, n, "nil"); return b; }
+    snprintf(b, n, "%p type=%lu arr=%lu samples=%lu fmt=%lu %lux%lu%s", (void *)t, (unsigned long)t.textureType,
+             (unsigned long)t.arrayLength, (unsigned long)t.sampleCount, (unsigned long)t.pixelFormat,
+             (unsigned long)t.width, (unsigned long)t.height, t.parentTexture ? " (view)" : "");
+    return b;
+}
+
+static void log_rpd(MTLRenderPassDescriptor *d, const char *how)
+{
+    static _Atomic unsigned n;
+    char b[160], r[160];
+    int i, any = 0;
+    if (!d || atomic_load(&n) > (unsigned)(rptrace() > 1 ? 100000 : 400))
+        return;
+    for (i = 0; i < 8; i++)
+        any |= tex_interesting(d.colorAttachments[i].texture);
+    any |= tex_interesting(d.depthAttachment.texture) | tex_interesting(d.stencilAttachment.texture);
+    if (!any)
+        return;
+    atomic_fetch_add(&n, 1);
+    fprintf(stderr, "[dmsubst rp] from %s: renderTargetArrayLength=%lu rtSize=%lux%lu defaultRasterSampleCount=%lu\n", how,
+            (unsigned long)d.renderTargetArrayLength, (unsigned long)d.renderTargetWidth,
+            (unsigned long)d.renderTargetHeight, (unsigned long)d.defaultRasterSampleCount);
+    for (i = 0; i < 8; i++)
+    {
+        MTLRenderPassColorAttachmentDescriptor *c = d.colorAttachments[i];
+        if (!c.texture)
+            continue;
+        fprintf(stderr, "[dmsubst rp]   color%d %s slice=%lu load=%lu store=%lu resolve=%s rslice=%lu\n", i,
+                tex_str(c.texture, b, sizeof(b)), (unsigned long)c.slice, (unsigned long)c.loadAction,
+                (unsigned long)c.storeAction, tex_str(c.resolveTexture, r, sizeof(r)), (unsigned long)c.resolveSlice);
+    }
+    if (d.depthAttachment.texture)
+        fprintf(stderr, "[dmsubst rp]   depth %s slice=%lu load=%lu store=%lu\n",
+                tex_str(d.depthAttachment.texture, b, sizeof(b)), (unsigned long)d.depthAttachment.slice,
+                (unsigned long)d.depthAttachment.loadAction, (unsigned long)d.depthAttachment.storeAction);
+    if (d.stencilAttachment.texture)
+        fprintf(stderr, "[dmsubst rp]   stencil %s slice=%lu\n", tex_str(d.stencilAttachment.texture, b, sizeof(b)),
+                (unsigned long)d.stencilAttachment.slice);
+}
+
+/* ---- D3DMetal layered-MSAA-depth workaround --------------------------------
+ * D3DMetal 4.0b1 encodes a pass whose depth/stencil attachment is a
+ * 2DMultisampleArray (a D3D11 TEXTURE2DMSARRAY DSV) with renderTargetArrayLength
+ * = 1, even when every attachment is a full 2-layer array bound at slice 0 (the
+ * same pass without the MSAA depth, or with a non-MSAA depth array, gets 2).
+ * On macOS a layer count of 1 disables layered rendering, so the
+ * SV_RenderTargetArrayIndex a vertex/geometry shader writes is ignored and all
+ * instances land in layer 0, and the deferred clear (load action) never reaches
+ * layer 1. That is exactly Unity's single-pass-instanced stereo with MSAA:
+ * both eyes superimposed in slice 0, slice 1 never written.
+ *
+ * Fix: for passes D3DMetal itself encodes, when the depth or stencil
+ * attachment is a 2DMultisampleArray and every attachment (and resolve
+ * target) is an array texture bound at slice 0, set renderTargetArrayLength to
+ * the smallest layer count. Only ever raises a count of 0/1.
+ * OXR_DMSUBST_LAYER_FIX=0 disables it. */
+
+static int layer_fix_enabled(void)
+{
+    static int on = -1;
+    if (on < 0)
+    {
+        const char *e = getenv("OXR_DMSUBST_LAYER_FIX");
+        on = e && *e ? atoi(e) : 1;
+    }
+    return on;
+}
+
+/* Is the call site in D3DMetal? A handful of call sites, so cache them */
+static int caller_is_d3dmetal(void *ret)
+{
+    static struct { _Atomic(void *) addr; _Atomic int yes; } cache[16];
+    static _Atomic unsigned next;
+    unsigned i;
+    Dl_info info;
+    int yes;
+
+    for (i = 0; i < 16; i++)
+        if (atomic_load(&cache[i].addr) == ret)
+            return atomic_load(&cache[i].yes);
+    yes = dladdr(ret, &info) && info.dli_fname && strstr(info.dli_fname, "D3DMetal");
+    i = atomic_fetch_add(&next, 1) % 16;
+    atomic_store(&cache[i].yes, yes);
+    atomic_store(&cache[i].addr, ret);
+    return yes;
+}
+
+static int layers_at_slice0(id<MTLTexture> t, NSUInteger slice, NSUInteger *min_layers)
+{
+    if (!t)
+        return 1;
+    if ((t.textureType != MTLTextureType2DArray && t.textureType != MTLTextureType2DMultisampleArray) || slice)
+        return 0;
+    if (t.arrayLength < *min_layers)
+        *min_layers = t.arrayLength;
+    return 1;
+}
+
+static _Atomic uint64_t g_n_layer_fixes;
+
+static void fix_layered_msaa_depth(MTLRenderPassDescriptor *d, void *ret)
+{
+    id<MTLTexture> dt = d.depthAttachment.texture, st = d.stencilAttachment.texture;
+    NSUInteger layers = NSUIntegerMax;
+    int i;
+
+    if (!d || d.renderTargetArrayLength > 1 || !layer_fix_enabled())
+        return;
+    if (!((dt && dt.textureType == MTLTextureType2DMultisampleArray) ||
+          (st && st.textureType == MTLTextureType2DMultisampleArray)))
+        return;
+    for (i = 0; i < 8; i++)
+    {
+        MTLRenderPassColorAttachmentDescriptor *c = d.colorAttachments[i];
+        if (!c.texture)
+            continue;
+        if (!layers_at_slice0(c.texture, c.slice, &layers) ||
+            !layers_at_slice0(c.resolveTexture, c.resolveSlice, &layers))
+            return;
+    }
+    if (!layers_at_slice0(dt, d.depthAttachment.slice, &layers) ||
+        !layers_at_slice0(st, d.stencilAttachment.slice, &layers))
+        return;
+    if (layers < 2 || layers == NSUIntegerMax || !caller_is_d3dmetal(ret))
+        return;
+    if (atomic_fetch_add(&g_n_layer_fixes, 1) == 0)
+        fprintf(stderr, "[dmsubst] D3DMetal layered pass with a multisample-array depth attachment had "
+                "renderTargetArrayLength=%lu; setting %lu so SV_RenderTargetArrayIndex works "
+                "(OXR_DMSUBST_LAYER_FIX=0 disables)\n", (unsigned long)d.renderTargetArrayLength,
+                (unsigned long)layers);
+    d.renderTargetArrayLength = layers;
+}
+
+static id swz_cb_rce(id self, SEL _cmd, MTLRenderPassDescriptor *d)
+{
+    IMP orig = ORIG(self, _cmd);
+    void *ret = __builtin_return_address(0);
+    if (rptrace())
+        log_rpd(d, caller_image(ret));
+    fix_layered_msaa_depth(d, ret);
+    if (rptrace() > 2)
+        log_rpd(d, "  after fix");
+    return orig ? ((id (*)(id, SEL, id))orig)(self, _cmd, d) : nil;
+}
+
+static id swz_cb_prce(id self, SEL _cmd, MTLRenderPassDescriptor *d)
+{
+    IMP orig = ORIG(self, _cmd);
+    void *ret = __builtin_return_address(0);
+    if (rptrace())
+        log_rpd(d, caller_image(ret));
+    fix_layered_msaa_depth(d, ret);
+    return orig ? ((id (*)(id, SEL, id))orig)(self, _cmd, d) : nil;
+}
+
+static void class_swizzle_cb(id cb)
+{
+    static const struct job jobs[] = {
+        { "renderCommandEncoderWithDescriptor:", (IMP)swz_cb_rce },
+        { "parallelRenderCommandEncoderWithDescriptor:", (IMP)swz_cb_prce },
+    };
+    static _Atomic(Class) memo;
+    Class c = cb ? object_getClass(cb) : Nil;
+    if (!c || atomic_load(&memo) == c)
+        return;
+    install_jobs(c, jobs, sizeof(jobs) / sizeof(jobs[0]), "command-buffer");
+    atomic_store(&memo, c);
+}
+
+static void log_view(id self, id view, MTLPixelFormat pf, MTLTextureType type, NSRange levels, NSRange slices, const char *how)
+{
+    static _Atomic unsigned n;
+    char b[160], v[160];
+    if (!tex_interesting(self) || atomic_fetch_add(&n, 1) > (unsigned)(rptrace() > 1 ? 100000 : 400))
+        return;
+    fprintf(stderr, "[dmsubst view] %s of %s: fmt=%lu type=%lu levels=%lu+%lu slices=%lu+%lu -> %s\n", how,
+            tex_str(self, b, sizeof(b)), (unsigned long)pf, (unsigned long)type, (unsigned long)levels.location,
+            (unsigned long)levels.length, (unsigned long)slices.location, (unsigned long)slices.length,
+            tex_str(view, v, sizeof(v)));
+}
+
+static id swz_tex_view4(id self, SEL _cmd, MTLPixelFormat pf, MTLTextureType type, NSRange levels, NSRange slices)
+{
+    IMP orig = ORIG(self, _cmd);
+    id v = orig ? ((id (*)(id, SEL, MTLPixelFormat, MTLTextureType, NSRange, NSRange))orig)(self, _cmd, pf, type, levels, slices) : nil;
+    log_view(self, v, pf, type, levels, slices, "view");
+    return v;
+}
+
+static id swz_tex_view5(id self, SEL _cmd, MTLPixelFormat pf, MTLTextureType type, NSRange levels, NSRange slices,
+                        MTLTextureSwizzleChannels sw)
+{
+    IMP orig = ORIG(self, _cmd);
+    id v = orig ? ((id (*)(id, SEL, MTLPixelFormat, MTLTextureType, NSRange, NSRange, MTLTextureSwizzleChannels))orig)(
+                      self, _cmd, pf, type, levels, slices, sw) : nil;
+    log_view(self, v, pf, type, levels, slices, "view+swizzle");
+    return v;
+}
+
+static id swz_tex_viewdesc(id self, SEL _cmd, id desc)
+{
+    IMP orig = ORIG(self, _cmd);
+    id v = orig ? ((id (*)(id, SEL, id))orig)(self, _cmd, desc) : nil;
+    NSRange lv = [[desc valueForKey:@"levelRange"] rangeValue], sl = [[desc valueForKey:@"sliceRange"] rangeValue];
+    log_view(self, v, (MTLPixelFormat)[[desc valueForKey:@"pixelFormat"] unsignedIntegerValue],
+             (MTLTextureType)[[desc valueForKey:@"textureType"] unsignedIntegerValue], lv, sl, "viewWithDescriptor");
+    return v;
+}
+
+static void class_swizzle_texview(id tex)
+{
+    static const struct job jobs[] = {
+        { "newTextureViewWithPixelFormat:textureType:levels:slices:", (IMP)swz_tex_view4 },
+        { "newTextureViewWithPixelFormat:textureType:levels:slices:swizzle:", (IMP)swz_tex_view5 },
+        { "newTextureViewWithDescriptor:", (IMP)swz_tex_viewdesc },
+    };
+    static _Atomic(Class) memo;
+    Class c = tex ? object_getClass(tex) : Nil;
+    if (!rptrace() || !c || atomic_load(&memo) == c)
+        return;
+    install_jobs(c, jobs, sizeof(jobs) / sizeof(jobs[0]), "texture-view");
+    atomic_store(&memo, c);
 }
 
 static void class_swizzle_classicq(id q)
@@ -867,6 +1129,19 @@ static void prime_classes(id<MTLDevice> dev)
     [hd release];
     buf = [dev newBufferWithLength:4096 options:MTLResourceStorageModeShared];
     [buf release];
+    {
+        /* our own queue + command buffer: swizzles the concrete classes
+         * D3DMetal's (possibly already existing) queues hand out */
+        id<MTLCommandQueue> q = [dev newCommandQueue];
+        atomic_fetch_sub(&g_n_classic_queues, 1);
+        @autoreleasepool {
+            id cb = [q commandBuffer];
+            id cbu = [q commandBufferWithUnretainedReferences];
+            class_swizzle_cb(cb);
+            class_swizzle_cb(cbu);
+        }
+        [q release];
+    }
     if ([dev respondsToSelector:@selector(newResidencySetWithDescriptor:error:)])
     {
         MTLResidencySetDescriptor *rd = [[MTLResidencySetDescriptor alloc] init];
