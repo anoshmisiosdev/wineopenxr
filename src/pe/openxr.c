@@ -1362,11 +1362,13 @@ static XrResult create_session_d3d12(struct wine_XrInstance *wine_instance,
     return XR_SUCCESS;
 }
 
-/* The LUID the app should look for. The unix half derives it from the
- * runtime's MTLDevice the way DXMT does; D3DMetal's DXGI reports its own. Pick
+/* The LUID the app should look for (D3D11 and D3D12). The unix half derives
+ * it from the runtime's MTLDevice the way DXMT does; D3DMetal's DXGI reports
+ * its own, so apps that look the adapter up by LUID (OpenComposite) find
+ * nothing unless it is swapped. Under DXMT the LUIDs already match. Pick
  * the DXGI adapter with that LUID if there is one, else the first hardware
  * adapter (there is one Metal GPU on Apple silicon) */
-static void d3d12_fix_adapter_luid(LUID *luid)
+static void fix_adapter_luid(LUID *luid)
 {
     HRESULT (WINAPI *create_factory)(REFIID, void **);
     IDXGIFactory1 *factory = NULL;
@@ -1399,9 +1401,10 @@ static void d3d12_fix_adapter_luid(LUID *luid)
     IDXGIFactory1_Release(factory);
     if (!matched && have_first)
     {
-        WINE_TRACE("adapter LUID %08lx:%08lx -> DXGI adapter %08lx:%08lx\n",
-                   (unsigned long)luid->HighPart, (unsigned long)luid->LowPart,
-                   (unsigned long)first.HighPart, (unsigned long)first.LowPart);
+        blog("adapter LUID %08lx:%08lx (from the runtime's MTLDevice) matches no DXGI adapter; "
+             "reporting DXGI adapter %08lx:%08lx",
+             (unsigned long)luid->HighPart, (unsigned long)luid->LowPart,
+             (unsigned long)first.HighPart, (unsigned long)first.LowPart);
         *luid = first;
     }
 }
@@ -2538,6 +2541,11 @@ XrResult WINAPI xrGetD3D11GraphicsRequirementsKHR(XrInstance instance,
     }
     if (params.result == XR_SUCCESS)
     {
+        fix_adapter_luid(&graphicsRequirements->adapterLuid);
+        blog("D3D11 xrGetD3D11GraphicsRequirementsKHR: adapter LUID %08lx:%08lx, min feature level 0x%x",
+             (unsigned long)graphicsRequirements->adapterLuid.HighPart,
+             (unsigned long)graphicsRequirements->adapterLuid.LowPart,
+             (unsigned)graphicsRequirements->minFeatureLevel);
         EnterCriticalSection(&primary_session_lock);
         wine_instance->d3d11_requirements_queried_for = systemId;
         LeaveCriticalSection(&primary_session_lock);
@@ -2605,7 +2613,7 @@ XrResult WINAPI xrGetD3D12GraphicsRequirementsKHR(XrInstance instance,
     }
     if (params.result == XR_SUCCESS)
     {
-        d3d12_fix_adapter_luid(&graphicsRequirements->adapterLuid);
+        fix_adapter_luid(&graphicsRequirements->adapterLuid);
         blog("D3D12 xrGetD3D12GraphicsRequirementsKHR: adapter LUID %08lx:%08lx, min feature level 0x%x",
              (unsigned long)graphicsRequirements->adapterLuid.HighPart,
              (unsigned long)graphicsRequirements->adapterLuid.LowPart,
