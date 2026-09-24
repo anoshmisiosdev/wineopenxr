@@ -77,6 +77,7 @@ FUNCTION_POLICIES = {
     "xrEndFrame": ThunkPolicy(pe=MANUAL, unix=MANUAL),
 
     "xrGetD3D11GraphicsRequirementsKHR": ThunkPolicy(pe=MANUAL, unix=MANUAL, dispatch=False),
+    "xrGetD3D12GraphicsRequirementsKHR": ThunkPolicy(pe=MANUAL, unix=MANUAL, dispatch=False),
     "xrConvertTimeToWin32PerformanceCounterKHR": ThunkPolicy(pe=MANUAL, unix=MANUAL, dispatch=False),
     "xrConvertWin32PerformanceCounterToTimeKHR": ThunkPolicy(pe=MANUAL, unix=MANUAL, dispatch=False),
 
@@ -87,6 +88,7 @@ FUNCTION_POLICIES = {
 
 SUPPORTED_EXTENSIONS = frozenset({
     "XR_KHR_D3D11_enable",
+    "XR_KHR_D3D12_enable",
     "XR_KHR_win32_convert_performance_counter_time",
     "XR_KHR_visibility_mask",
     "XR_KHR_composition_layer_depth",
@@ -121,16 +123,18 @@ STRIPPED_NEXT_CHAINS = frozenset({"XrInstanceCreateInfo"})
 REGISTRY_SUPPORTED_REQUIRES = frozenset({
     "openxr_platform_defines",
     "d3dcommon.h",
+    "d3d12.h",
     "windows.h",
 })
 
 D3D11_GUARD = "XR_USE_GRAPHICS_API_D3D11"
+D3D12_GUARD = "XR_USE_GRAPHICS_API_D3D12"
 METAL_GUARD = "XR_USE_GRAPHICS_API_METAL"
 WIN32_GUARD = "XR_USE_PLATFORM_WIN32"
 TIMESPEC_GUARD = "XR_USE_TIMESPEC"
 
-PE_GUARDS = frozenset({None, D3D11_GUARD, WIN32_GUARD})
-GUARD_ORDER = (D3D11_GUARD, METAL_GUARD, WIN32_GUARD, TIMESPEC_GUARD)
+PE_GUARDS = frozenset({None, D3D11_GUARD, D3D12_GUARD, WIN32_GUARD})
+GUARD_ORDER = (D3D11_GUARD, D3D12_GUARD, METAL_GUARD, WIN32_GUARD, TIMESPEC_GUARD)
 
 WRAPPED_HANDLES = {
     "XrInstance":  ("wine_instance_from_handle",  "host_instance"),
@@ -657,6 +661,7 @@ def emit_pe_thunks_c(plan):
     out.append("#include <windows.h>")
     out.append("")
     out.append(f"#define {D3D11_GUARD}")
+    out.append(f"#define {D3D12_GUARD}")
     out.append(f"#define {WIN32_GUARD}")
     out.append("")
     out.append('#include "bridge.h"')
@@ -743,6 +748,7 @@ def emit_unix_thunks_c(plan):
     out.append("")
     out.append(f"#define {METAL_GUARD}")
     out.append(f"#define {D3D11_GUARD}")
+    out.append(f"#define {D3D12_GUARD}")
     out.append(f"#define {WIN32_GUARD}")
     out.append(f"#define {TIMESPEC_GUARD}")
     out.append("")

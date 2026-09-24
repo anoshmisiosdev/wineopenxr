@@ -2,6 +2,7 @@
 
 #define XR_USE_GRAPHICS_API_METAL
 #define XR_USE_GRAPHICS_API_D3D11
+#define XR_USE_GRAPHICS_API_D3D12
 #define XR_USE_PLATFORM_WIN32
 #define XR_USE_TIMESPEC
 
@@ -36,6 +37,7 @@ extern NTSTATUS wine_xrEndFrame(void *args);
 extern NTSTATUS wine_xrEnumerateInstanceExtensionProperties(void *args);
 extern NTSTATUS wine_xrEnumerateSwapchainFormats(void *args);
 extern NTSTATUS wine_xrGetD3D11GraphicsRequirementsKHR(void *args);
+extern NTSTATUS wine_xrGetD3D12GraphicsRequirementsKHR(void *args);
 extern NTSTATUS wine_xrReleaseSwapchainImage(void *args);
 
 static NTSTATUS thunk_xrAcquireSwapchainImage(void *args)
@@ -868,6 +870,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     thunk_xrGetActionStateVector2f,
     thunk_xrGetCurrentInteractionProfile,
     wine_xrGetD3D11GraphicsRequirementsKHR,
+    wine_xrGetD3D12GraphicsRequirementsKHR,
     thunk_xrGetDisplayRefreshRateFB,
     thunk_xrGetInputSourceLocalizedName,
     thunk_xrGetInstanceProperties,

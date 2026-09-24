@@ -33,6 +33,10 @@ struct extension_substitution {
 static const struct extension_substitution substitute_extensions[] = {
     {"XR_KHR_D3D11_enable", "XR_KHR_metal_enable",
      XR_KHR_D3D11_enable_SPEC_VERSION},
+    /* D3D12 swapchain images are D3DMetal resources substituted with the
+     * runtime's MTLTextures (src/unix/dmsubst.m); no DXMT D3D12 path */
+    {"XR_KHR_D3D12_enable", "XR_KHR_metal_enable",
+     XR_KHR_D3D12_enable_SPEC_VERSION},
 };
 
 /* Extensions the bridge implements entirely on its own side, with no native

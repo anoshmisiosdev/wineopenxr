@@ -23,6 +23,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(openxr);
  * content that clashes with Metal.h */
 typedef struct { long long QuadPart; } LARGE_INTEGER;
 #define XR_USE_GRAPHICS_API_D3D11 1
+#define XR_USE_GRAPHICS_API_D3D12 1
 #define XR_USE_GRAPHICS_API_METAL 1
 #define XR_USE_PLATFORM_WIN32 1
 #define XR_USE_TIMESPEC 1
@@ -253,6 +254,49 @@ NTSTATUS wine_xrGetD3D11GraphicsRequirementsKHR(void *args)
             if (metal_reqs.metalDevice)
             {
                 /* DXMT bit-casts bswap64(MTLDevice.registryID) into LUID */
+                uint64_t reg_id = [(id<MTLDevice>)metal_reqs.metalDevice registryID];
+                uint64_t swapped = __builtin_bswap64(reg_id);
+                memcpy(&params->graphicsRequirements->adapterLuid, &swapped, sizeof(swapped));
+            }
+            else
+            {
+                WINE_ERR("metalDevice is NULL from requirements\n");
+                params->result = XR_ERROR_RUNTIME_FAILURE;
+            }
+        }
+
+        return STATUS_SUCCESS;
+    }
+}
+
+/* Same as the D3D11 query; the PE side swaps the LUID for the DXGI adapter's
+ * (D3DMetal reports its own) */
+NTSTATUS wine_xrGetD3D12GraphicsRequirementsKHR(void *args)
+{
+    @autoreleasepool {
+        struct xrGetD3D12GraphicsRequirementsKHR_params *params = args;
+        struct wine_XrInstance *wine_instance = wine_instance_from_handle(params->instance);
+        struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
+        XrGraphicsRequirementsMetalKHR metal_reqs = {
+            .type = XR_TYPE_GRAPHICS_REQUIREMENTS_METAL_KHR,
+        };
+
+        if (!funcs->p_xrGetMetalGraphicsRequirementsKHR)
+        {
+            params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
+            return STATUS_SUCCESS;
+        }
+
+        params->result = funcs->p_xrGetMetalGraphicsRequirementsKHR(
+            wine_instance->host_instance, params->systemId, &metal_reqs);
+
+        if (params->result == XR_SUCCESS)
+        {
+            params->graphicsRequirements->type = XR_TYPE_GRAPHICS_REQUIREMENTS_D3D12_KHR;
+            params->graphicsRequirements->minFeatureLevel = 0xb000; /* D3D_FEATURE_LEVEL_11_0 */
+
+            if (metal_reqs.metalDevice)
+            {
                 uint64_t reg_id = [(id<MTLDevice>)metal_reqs.metalDevice registryID];
                 uint64_t swapped = __builtin_bswap64(reg_id);
                 memcpy(&params->graphicsRequirements->adapterLuid, &swapped, sizeof(swapped));

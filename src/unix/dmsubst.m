@@ -1372,6 +1372,11 @@ static uint32_t detect(void)
     return flags;
 }
 
+int dmsubst_process_has_d3dmetal(void)
+{
+    return !!(detect() & DMSUBST_DETECT_D3DMETAL);
+}
+
 /* Runs when Wine dlopens this .so, i.e. when wineopenxr.dll is loaded (usually
  * the game's first OpenXR call, before it creates its D3D11 device). */
 __attribute__((constructor)) static void dmsubst_early_init(void)

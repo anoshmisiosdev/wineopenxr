@@ -7,6 +7,7 @@
 
 #define XR_USE_GRAPHICS_API_METAL
 #define XR_USE_GRAPHICS_API_D3D11
+#define XR_USE_GRAPHICS_API_D3D12
 #define XR_USE_PLATFORM_WIN32
 #define XR_USE_TIMESPEC
 
@@ -48,6 +49,28 @@ static BOOL extension_is_supported(const char *name)
         if (!strcmp(name, xr_bridge_extensions[i]))
             return TRUE;
     return FALSE;
+}
+
+extern int dmsubst_process_has_d3dmetal(void);
+
+/* XR_KHR_D3D12_enable only works on D3DMetal (src/pe/openxr.c). Advertise it
+ * only where D3DMetal is the bottle's backend, so apps that pick D3D12 when
+ * offered keep running on D3D11 under DXMT exactly as before.
+ * OXR_BRIDGE_D3D12=0/1 overrides */
+static BOOL d3d12_advertised(void)
+{
+    const char *e = getenv("OXR_BRIDGE_D3D12");
+    if (e && *e)
+        return atoi(e) != 0;
+    e = getenv("CX_GRAPHICS_BACKEND");
+    if (e && strstr(e, "d3dmetal"))
+        return TRUE;
+    return dmsubst_process_has_d3dmetal();
+}
+
+static BOOL extension_hidden(const char *win32_name)
+{
+    return win32_name && !strcmp(win32_name, "XR_KHR_D3D12_enable") && !d3d12_advertised();
 }
 
 static const char *translate_app_extension_name(const char *name)
@@ -127,7 +150,7 @@ static uint32_t apply_substitutions(const XrExtensionProperties *native_list,
             if (!sub->native_ext || strcmp(native->extensionName, sub->native_ext))
                 continue;
 
-            if (sub->win32_ext)
+            if (sub->win32_ext && !extension_hidden(sub->win32_ext))
                 emit_extension(out, out_cap, &output_count,
                                native, sub->win32_ext, sub->version);
             handled = TRUE;
@@ -237,7 +260,7 @@ NTSTATUS wine_xrCreateInstance(void *args)
          extension_index++)
     {
         const char *extension_name = params->createInfo->enabledExtensionNames[extension_index];
-        if (!extension_is_supported(extension_name))
+        if (!extension_is_supported(extension_name) || extension_hidden(extension_name))
         {
             WARN("Rejecting extension not enumerated: %s\n", extension_name);
             res = XR_ERROR_EXTENSION_NOT_PRESENT;
@@ -270,7 +293,18 @@ NTSTATUS wine_xrCreateInstance(void *args)
             continue;
         }
 
-        new_list[translated_count++] = translate_app_extension_name(extension_name);
+        {
+            /* XR_KHR_D3D11_enable and XR_KHR_D3D12_enable both map to
+             * XR_KHR_metal_enable; an app enabling both must not hand the
+             * host a duplicate name */
+            const char *host_name = translate_app_extension_name(extension_name);
+            uint32_t k;
+            for (k = 0; k < translated_count; k++)
+                if (!strcmp(new_list[k], host_name))
+                    break;
+            if (k == translated_count)
+                new_list[translated_count++] = host_name;
+        }
     }
 
     our_info = *params->createInfo;

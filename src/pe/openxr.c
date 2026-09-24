@@ -2,6 +2,7 @@
 
 /* Must precede any header that includes openxr_platform.h */
 #define XR_USE_GRAPHICS_API_D3D11
+#define XR_USE_GRAPHICS_API_D3D12
 #define XR_USE_PLATFORM_WIN32
 
 #include <stdlib.h>
@@ -11,6 +12,7 @@
 #include <windows.h>
 #include <initguid.h>
 #include <d3d11_4.h>
+#include <d3d12.h>
 #include <dxgi.h>
 
 #include <wine/debug.h>
@@ -752,9 +754,10 @@ uint64_t WINAPI wineopenxr_proto_session_event(XrSession session, uint64_t *valu
     return wine_session->mtl_shared_event;
 }
 
-/* Does this PE module import winemetal.dll (DXMT's d3d11 does; D3DMetal's does
- * not - it is a thin PE over a unix lib that loads D3DMetal.framework)? */
-static int module_imports_winemetal(HMODULE module)
+/* Does this PE module import `dll`? DXMT's d3d11 imports winemetal.dll (and
+ * its D3D12 port winemetal4.dll); D3DMetal's does neither - it is a thin PE
+ * over a unix lib that loads D3DMetal.framework */
+static int module_imports(HMODULE module, const char *dll)
 {
     const BYTE *base = (const BYTE *)module;
     const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)base;
@@ -769,9 +772,14 @@ static int module_imports_winemetal(HMODULE module)
     if (!dir->VirtualAddress)
         return 0;
     for (imp = (const IMAGE_IMPORT_DESCRIPTOR *)(base + dir->VirtualAddress); imp->Name; imp++)
-        if (!lstrcmpiA((const char *)(base + imp->Name), "winemetal.dll"))
+        if (!lstrcmpiA((const char *)(base + imp->Name), dll))
             return 1;
     return 0;
+}
+
+static int module_imports_winemetal(HMODULE module)
+{
+    return module_imports(module, "winemetal.dll");
 }
 
 /* Pick the swapchain-image path for this device: 1 = D3DMetal substitution,
@@ -997,17 +1005,343 @@ static uint64_t dmsubst_create_fence(struct wine_XrSession *session)
     return p.event;
 }
 
+
+/* ==== D3D12 (XR_KHR_D3D12_enable) on CrossOver's D3DMetal ====================
+ *
+ * Same substitution as the D3D11 path (see dmsubst.h): on D3DMetal 4.0b1 a
+ * D3D12 CreateCommittedResource allocates exactly one MTLTexture through
+ * -[MTLDevice newTextureWithDescriptor:], synchronously on the calling thread,
+ * and CreateFence makes one -newEvent there too. So swapchain images are
+ * committed resources whose MTLTexture is the runtime's own image, and the
+ * release fence is an ID3D12Fence whose MTLEvent we swapped for an
+ * MTLSharedEvent: ID3D12CommandQueue::Signal on the app's binding queue lands
+ * on it behind everything the app submitted, and the unix half GPU-waits on it
+ * on the runtime's queue (encode_gpu_wait), as for D3D11.
+ *
+ * Only D3DMetal. DXMT's D3D12 (gamesir's port) and vkd3d have no Metal
+ * interop we could use; those devices are refused at xrCreateSession with
+ * XR_ERROR_GRAPHICS_DEVICE_INVALID and an explanation in the log.
+ * OXR_BRIDGE_D3D12_BACKEND=d3dmetal skips the backend check. */
+
+/* 1 if the device is D3DMetal's (use substitution), 0 if unsupported */
+static int d3d12_device_is_d3dmetal(ID3D12Device *device)
+{
+    const char *env = getenv("OXR_BRIDGE_D3D12_BACKEND");
+    struct dmsubst_params p;
+    HMODULE module = NULL;
+    char path[MAX_PATH] = "?";
+    int dxmt;
+
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       (LPCSTR)device->lpVtbl->CreateCommittedResource, &module);
+    if (module)
+        GetModuleFileNameA(module, path, sizeof(path));
+    dxmt = module_imports(module, "winemetal.dll") || module_imports(module, "winemetal4.dll");
+
+    memset(&p, 0, sizeof(p));
+    p.op = DMSUBST_OP_DETECT;
+    dmsubst_call(&p);
+
+    WINE_FIXME("D3D12 device vtable in %s (imports winemetal: %d); process has D3DMetal=%d DXMT=%d\n",
+               path, dxmt, !!(p.detect_flags & DMSUBST_DETECT_D3DMETAL),
+               !!(p.detect_flags & DMSUBST_DETECT_DXMT));
+
+    if (env && !strcmp(env, "d3dmetal"))
+        return 1;
+    if (dxmt)
+    {
+        WINE_ERR("this D3D12 device is DXMT's (%s). XR_KHR_D3D12_enable is only implemented "
+                 "on CrossOver's D3DMetal; select D3DMetal as the bottle's graphics backend "
+                 "(CX_GRAPHICS_BACKEND=d3dmetal) or run the app in D3D11 mode\n", path);
+        return 0;
+    }
+    if (!(p.detect_flags & DMSUBST_DETECT_D3DMETAL))
+    {
+        WINE_ERR("this D3D12 device (%s) is not D3DMetal's (D3DMetal.framework is not loaded; "
+                 "vkd3d?). XR_KHR_D3D12_enable is only implemented on CrossOver's D3DMetal; "
+                 "select D3DMetal as the bottle's graphics backend\n", path);
+        return 0;
+    }
+    return 1;
+}
+
+/* GPU release fence: an ID3D12Fence whose MTLEvent is an MTLSharedEvent we
+ * own a +1 on. Returns the id<MTLSharedEvent>, or 0 for the CPU fallback */
+static uint64_t d3d12_create_gpu_fence(struct wine_XrSession *session)
+{
+    const char *env = getenv("OXR_DMSUBST_SYNC");
+    ID3D12Fence *fence = NULL;
+    struct dmsubst_params p;
+    HRESULT hr;
+
+    if (env && !strcmp(env, "cpu"))
+        return 0;
+
+    memset(&p, 0, sizeof(p));
+    p.op = DMSUBST_OP_ARM;
+    p.flags = DMSUBST_ARM_PROBE | DMSUBST_ARM_EVENT_SHARED;
+    dmsubst_call(&p);
+    hr = ID3D12Device_CreateFence(session->d3d12_device, 0, D3D12_FENCE_FLAG_NONE,
+                                  &IID_ID3D12Fence, (void **)&fence);
+    memset(&p, 0, sizeof(p));
+    p.op = DMSUBST_OP_DISARM;
+    dmsubst_call(&p);
+
+    if (FAILED(hr) || !fence || !p.event)
+    {
+        WINE_WARN("could not capture a Metal event behind ID3D12Fence (hr 0x%08x, event 0x%llx); "
+                  "falling back to a CPU release wait\n", (unsigned)hr, (unsigned long long)p.event);
+        if (fence)
+            ID3D12Fence_Release(fence);
+        if (p.event)
+        {
+            struct release_metal_session_params rel = { .mtl_shared_event = p.event };
+            UNIX_CALL(release_metal_session, &rel);
+        }
+        return 0;
+    }
+    session->d3d12_fence = fence;
+    WINE_FIXME("GPU release sync: ID3D12Fence backed by MTLSharedEvent 0x%llx (via %s)\n",
+               (unsigned long long)p.event, p.where);
+    return p.event;
+}
+
+/* CPU fallback: signal a plain fence on the app queue and wait for it */
+static void d3d12_cpu_release_sync(struct wine_XrSession *session)
+{
+    UINT64 value;
+
+    if (!session->d3d12_cpu_fence)
+    {
+        if (FAILED(ID3D12Device_CreateFence(session->d3d12_device, 0, D3D12_FENCE_FLAG_NONE,
+                                            &IID_ID3D12Fence, (void **)&session->d3d12_cpu_fence)))
+        {
+            session->d3d12_cpu_fence = NULL;
+            return;
+        }
+        session->d3d12_cpu_event = CreateEventA(NULL, FALSE, FALSE, NULL);
+    }
+    value = ++session->d3d12_cpu_fence_value;
+    if (FAILED(ID3D12CommandQueue_Signal(session->d3d12_queue, session->d3d12_cpu_fence, value)))
+        return;
+    if (ID3D12Fence_GetCompletedValue(session->d3d12_cpu_fence) >= value)
+        return;
+    if (session->d3d12_cpu_event &&
+        SUCCEEDED(ID3D12Fence_SetEventOnCompletion(session->d3d12_cpu_fence, value,
+                                                   session->d3d12_cpu_event)) &&
+        WaitForSingleObject(session->d3d12_cpu_event, 1000) == WAIT_OBJECT_0)
+        return;
+    WINE_WARN("release sync: D3D12 fence %llu not reached after 1s\n", (unsigned long long)value);
+}
+
+static void release_d3d12_refs(struct wine_XrSession *sess)
+{
+    if (sess->d3d12_fence)
+    {
+        ID3D12Fence_Release(sess->d3d12_fence);
+        sess->d3d12_fence = NULL;
+    }
+    if (sess->d3d12_cpu_fence)
+    {
+        ID3D12Fence_Release(sess->d3d12_cpu_fence);
+        sess->d3d12_cpu_fence = NULL;
+    }
+    if (sess->d3d12_cpu_event)
+    {
+        CloseHandle(sess->d3d12_cpu_event);
+        sess->d3d12_cpu_event = NULL;
+    }
+    if (sess->d3d12_queue)
+    {
+        ID3D12CommandQueue_Release(sess->d3d12_queue);
+        sess->d3d12_queue = NULL;
+    }
+    if (sess->d3d12_device)
+    {
+        ID3D12Device_Release(sess->d3d12_device);
+        sess->d3d12_device = NULL;
+    }
+}
+
+/* Per the XR_KHR_D3D12_enable spec, images are handed out (and must be
+ * returned) in RENDER_TARGET for colour, DEPTH_WRITE for depth, and
+ * UNORDERED_ACCESS when UAV is the only attachment-type usage */
+static D3D12_RESOURCE_STATES d3d12_image_state(XrSwapchainUsageFlags usage, int depth)
+{
+    if (depth)
+        return D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    if ((usage & XR_SWAPCHAIN_USAGE_UNORDERED_ACCESS_BIT) &&
+        !(usage & XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT))
+        return D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    return D3D12_RESOURCE_STATE_RENDER_TARGET;
+}
+
+/* D3D12 twin of create_substituted_texture: a committed resource whose
+ * MTLTexture is the runtime's swapchain image */
+static HRESULT create_substituted_d3d12_resource(struct wine_XrSession *session,
+                                                 const D3D12_RESOURCE_DESC *desc,
+                                                 D3D12_RESOURCE_STATES state,
+                                                 uint64_t mtl_texture, ID3D12Resource **out)
+{
+    D3D12_HEAP_PROPERTIES heap;
+    struct dmsubst_params p;
+    HRESULT hr;
+
+    *out = NULL;
+    memset(&heap, 0, sizeof(heap));
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    heap.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+    heap.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+
+    memset(&p, 0, sizeof(p));
+    p.op = DMSUBST_OP_ARM;
+    p.mtl_texture = mtl_texture;
+    if (dmsubst_call(&p))
+        return E_FAIL;
+
+    hr = ID3D12Device_CreateCommittedResource(session->d3d12_device, &heap, D3D12_HEAP_FLAG_NONE,
+                                              desc, state, NULL, &IID_ID3D12Resource, (void **)out);
+
+    memset(&p, 0, sizeof(p));
+    p.op = DMSUBST_OP_DISARM;
+    dmsubst_call(&p);
+
+    WINE_FIXME("D3D12 substitution: hr=0x%08x captured=%u seen=%u (any thread %u) via %s, "
+               "D3DMetal asked fmt=%u type=%u %ux%u arr=%u usage=0x%llx storage=%u%s\n",
+               (unsigned)hr, p.captured, p.seen, p.global_seen, p.where, p.desc_pixel_format,
+               p.desc_texture_type, p.desc_width, p.desc_height, p.desc_array_length,
+               (unsigned long long)p.desc_usage, p.desc_storage_mode,
+               p.result_is_view ? " (handed a view)" : "");
+
+    if (SUCCEEDED(hr) && !p.captured)
+    {
+        WINE_ERR("D3DMetal did not create the D3D12 swapchain resource through a hooked "
+                 "Metal selector on this thread; cannot substitute\n");
+        if (*out)
+            ID3D12Resource_Release(*out);
+        *out = NULL;
+        return E_FAIL;
+    }
+    return hr;
+}
+
+static XrResult create_session_d3d12(struct wine_XrInstance *wine_instance,
+                                     const XrGraphicsBindingD3D12KHR *binding,
+                                     XrSystemId system_id,
+                                     struct wine_XrSession *wine_session)
+{
+    struct create_d3d11_session_params params;
+    struct dmsubst_params p;
+    NTSTATUS status;
+
+    if (!binding->device || !binding->queue)
+    {
+        WINE_WARN("D3D12 binding has NULL device (%p) or queue (%p)\n",
+                  (void *)binding->device, (void *)binding->queue);
+        return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+    }
+    if (!d3d12_device_is_d3dmetal(binding->device))
+        return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+
+    wine_session->d3d12_device = binding->device;
+    ID3D12Device_AddRef(wine_session->d3d12_device);
+    wine_session->d3d12_queue = binding->queue;
+    ID3D12CommandQueue_AddRef(wine_session->d3d12_queue);
+
+    memset(&p, 0, sizeof(p));
+    p.op = DMSUBST_OP_INSTALL;
+    dmsubst_call(&p);
+    wine_session->dmsubst = 1;
+
+    /* The unix half's Metal session setup is API-agnostic: the runtime gets
+     * a Metal binding whatever the app bound */
+    memset(&params, 0, sizeof(params));
+    params.instance = (XrInstance)wine_instance;
+    params.system_id = system_id;
+    params.session = &wine_session->host_session;
+
+    status = UNIX_CALL(create_d3d11_session, &params);
+    if (status)
+    {
+        WINE_ERR("create_d3d11_session unix call failed: 0x%x\n", (unsigned)status);
+        release_d3d12_refs(wine_session);
+        return XR_ERROR_RUNTIME_FAILURE;
+    }
+    if (params.result != XR_SUCCESS)
+    {
+        release_d3d12_refs(wine_session);
+        return params.result;
+    }
+
+    wine_session->mtl_device = params.mtl_device;
+    wine_session->mtl_command_queue = params.mtl_command_queue;
+    wine_session->mtl_shared_event = d3d12_create_gpu_fence(wine_session);
+    WINE_FIXME("D3D12 session on D3DMetal: swapchain images via Metal texture substitution, "
+               "%s release sync (Metal 4 queue seen: %d)\n",
+               wine_session->mtl_shared_event ? "GPU" : "CPU",
+               !!(p.detect_flags & DMSUBST_DETECT_MTL4));
+    return XR_SUCCESS;
+}
+
+/* The LUID the app should look for. The unix half derives it from the
+ * runtime's MTLDevice the way DXMT does; D3DMetal's DXGI reports its own. Pick
+ * the DXGI adapter with that LUID if there is one, else the first hardware
+ * adapter (there is one Metal GPU on Apple silicon) */
+static void d3d12_fix_adapter_luid(LUID *luid)
+{
+    HRESULT (WINAPI *create_factory)(REFIID, void **);
+    IDXGIFactory1 *factory = NULL;
+    IDXGIAdapter1 *adapter = NULL;
+    HMODULE dxgi = LoadLibraryA("dxgi.dll");
+    LUID first = {0, 0};
+    int have_first = 0, matched = 0;
+    UINT i;
+
+    if (!dxgi)
+        return;
+    create_factory = (void *)GetProcAddress(dxgi, "CreateDXGIFactory1");
+    if (!create_factory || FAILED(create_factory(&IID_IDXGIFactory1, (void **)&factory)))
+        return;
+    for (i = 0; IDXGIFactory1_EnumAdapters1(factory, i, &adapter) == S_OK; i++)
+    {
+        DXGI_ADAPTER_DESC1 desc;
+        if (SUCCEEDED(IDXGIAdapter1_GetDesc1(adapter, &desc)))
+        {
+            if (desc.AdapterLuid.LowPart == luid->LowPart && desc.AdapterLuid.HighPart == luid->HighPart)
+                matched = 1;
+            if (!have_first && !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE))
+            {
+                first = desc.AdapterLuid;
+                have_first = 1;
+            }
+        }
+        IDXGIAdapter1_Release(adapter);
+    }
+    IDXGIFactory1_Release(factory);
+    if (!matched && have_first)
+    {
+        WINE_TRACE("adapter LUID %08lx:%08lx -> DXGI adapter %08lx:%08lx\n",
+                   (unsigned long)luid->HighPart, (unsigned long)luid->LowPart,
+                   (unsigned long)first.HighPart, (unsigned long)first.LowPart);
+        *luid = first;
+    }
+}
+
+/* Swapchain image arrays share one layout for D3D11 and D3D12
+ * ({type, next, texture}); both texture types are IUnknowns */
 static void release_imported_d3d11_textures(XrSwapchainImageD3D11KHR *images,
                                             uint32_t count)
 {
     uint32_t i;
     for (i = 0; i < count; i++)
-        ID3D11Texture2D_Release(images[i].texture);
+        IUnknown_Release((IUnknown *)images[i].texture);
 }
 
 static void release_dxmt_refs(struct wine_XrSession *sess)
 {
     session_kmt_teardown(sess);
+    release_d3d12_refs(sess);
     if (sess->dms_fence)
     {
         ID3D11Fence_Release((ID3D11Fence *)sess->dms_fence);
@@ -1203,6 +1537,7 @@ XrResult WINAPI xrCreateSession(XrInstance instance,
     struct wine_XrSession *wine_session;
     const XrBaseInStructure *chain;
     const XrGraphicsBindingD3D11KHR *d3d11_binding = NULL;
+    const XrGraphicsBindingD3D12KHR *d3d12_binding = NULL;
     XrSystemId queried;
     XrResult result;
 
@@ -1231,23 +1566,29 @@ XrResult WINAPI xrCreateSession(XrInstance instance,
             d3d11_binding = (const XrGraphicsBindingD3D11KHR *)chain;
             break;
         }
+        if (chain->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR)
+        {
+            d3d12_binding = (const XrGraphicsBindingD3D12KHR *)chain;
+            break;
+        }
     }
 
-    if (!d3d11_binding)
+    if (!d3d11_binding && !d3d12_binding)
     {
         /* Probe systemId first so invalid systems return XR_ERROR_SYSTEM_INVALID
-         * before the missing D3D11 binding error */
+         * before the missing D3D11/D3D12 binding error */
         result = result_with_system_id_precedence(
             instance, createInfo->systemId, XR_ERROR_GRAPHICS_DEVICE_INVALID);
         if (result == XR_ERROR_GRAPHICS_DEVICE_INVALID)
-            WINE_ERR("No D3D11 graphics binding in createInfo->next chain\n");
+            WINE_ERR("No D3D11 or D3D12 graphics binding in createInfo->next chain\n");
         else
             WINE_WARN("xrCreateSession failed: %d\n", result);
         return result;
     }
 
     EnterCriticalSection(&primary_session_lock);
-    queried = wine_instance->d3d11_requirements_queried_for;
+    queried = d3d12_binding ? wine_instance->d3d12_requirements_queried_for
+                            : wine_instance->d3d11_requirements_queried_for;
     LeaveCriticalSection(&primary_session_lock);
 
     if (queried != createInfo->systemId)
@@ -1269,8 +1610,12 @@ XrResult WINAPI xrCreateSession(XrInstance instance,
     wine_session->swapchain_list.next = &wine_session->swapchain_list;
     wine_session->swapchain_list.prev = &wine_session->swapchain_list;
 
-    result = create_session_d3d11(wine_instance, d3d11_binding,
-                                  createInfo->systemId, wine_session);
+    if (d3d12_binding)
+        result = create_session_d3d12(wine_instance, d3d12_binding,
+                                      createInfo->systemId, wine_session);
+    else
+        result = create_session_d3d11(wine_instance, d3d11_binding,
+                                      createInfo->systemId, wine_session);
     if (result != XR_SUCCESS)
     {
         WINE_WARN("xrCreateSession failed: %d\n", result);
@@ -1528,6 +1873,52 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
                 ID3D11Texture2D *texture = NULL;
                 HRESULT hr;
 
+                if (wine_session->d3d12_device)
+                {
+                    D3D12_RESOURCE_DESC rd;
+                    ID3D12Resource *resource = NULL;
+                    XrSwapchainUsageFlags usage = wine_swapchain->create_info.usageFlags;
+                    int depth = is_depth_dxgi_format(mt_params.dxgi_format);
+
+                    memset(&rd, 0, sizeof(rd));
+                    rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+                    rd.Width = mt_params.width;
+                    rd.Height = mt_params.height;
+                    rd.DepthOrArraySize = (UINT16)(mt_params.array_size ? mt_params.array_size : 1);
+                    rd.MipLevels = (UINT16)(wine_swapchain->create_info.mipCount
+                                            ? wine_swapchain->create_info.mipCount : 1);
+                    /* Typeless, as for D3D11: apps create typed views */
+                    rd.Format = (DXGI_FORMAT)dxgi_typeless_parent(mt_params.dxgi_format);
+                    rd.SampleDesc.Count = 1;
+                    rd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+                    rd.Flags = depth ? D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL
+                                     : D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+                    if (usage & XR_SWAPCHAIN_USAGE_UNORDERED_ACCESS_BIT)
+                        rd.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+                    hr = create_substituted_d3d12_resource(wine_session, &rd,
+                                                           d3d12_image_state(usage, depth),
+                                                           mtl_textures[i], &resource);
+                    if (FAILED(hr))
+                    {
+                        WINE_ERR("creating D3D12 swapchain image %u failed: 0x%08x\n",
+                                 i, (unsigned)hr);
+                        release_imported_d3d11_textures(d3d11_images, i);
+                        free(d3d11_images);
+                        free(mtl_textures);
+                        free(mach_port_names);
+                        LeaveCriticalSection(&wine_session->swapchain_lock);
+                        return XR_ERROR_RUNTIME_FAILURE;
+                    }
+                    /* XrSwapchainImageD3D12KHR has the same layout */
+                    d3d11_images[i].type = XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR;
+                    d3d11_images[i].next = NULL;
+                    d3d11_images[i].texture = (ID3D11Texture2D *)resource;
+                    WINE_TRACE("D3D12 swapchain image %u: ID3D12Resource %p on MTLTexture 0x%llx\n",
+                               i, (void *)resource, (unsigned long long)mtl_textures[i]);
+                    continue;
+                }
+
                 memset(&desc, 0, sizeof(desc));
                 desc.Width = mt_params.width;
                 desc.Height = mt_params.height;
@@ -1648,9 +2039,29 @@ XrResult WINAPI xrReleaseSwapchainImage(XrSwapchain swapchain,
             WINE_WARN("sync carrier signal failed: 0x%08x\n", (unsigned)hr);
     }
 
+    /* D3D12: signal the MTLSharedEvent-backed fence on the app's binding
+     * queue, behind everything the app submitted there; the unix half makes
+     * the runtime's queue GPU-wait for it. Without one, CPU-wait */
+    if (wine_session->d3d12_device)
+    {
+        HRESULT hr = E_FAIL;
+        if (wine_session->d3d12_fence && wine_session->mtl_shared_event)
+        {
+            EnterCriticalSection(&wine_session->swapchain_lock);
+            hr = ID3D12CommandQueue_Signal(wine_session->d3d12_queue, wine_session->d3d12_fence,
+                                           (UINT64)(wine_session->gpu_fence_value + 1));
+            if (SUCCEEDED(hr))
+                params.gpu_fence_value = (uint64_t)++wine_session->gpu_fence_value;
+            LeaveCriticalSection(&wine_session->swapchain_lock);
+            if (FAILED(hr))
+                WINE_WARN("D3D12 fence signal failed: 0x%08x; CPU-waiting instead\n", (unsigned)hr);
+        }
+        if (FAILED(hr))
+            d3d12_cpu_release_sync(wine_session);
+    }
     /* PROTOTYPE D3DMetal path: signal the substituted fence event on
      * D3DMetal's queue (GPU sync), or CPU-wait for the GPU without one */
-    if (wine_session->dmsubst)
+    else if (wine_session->dmsubst)
     {
         if (wine_session->dms_fence && wine_session->mtl_shared_event)
         {
@@ -2024,6 +2435,38 @@ XrResult WINAPI xrConvertWin32PerformanceCounterToTimeKHR(XrInstance instance,
         WINE_ERR("xrConvertWin32PerformanceCounterToTimeKHR unix call failed: 0x%x\n",
                  (unsigned)status);
         return XR_ERROR_RUNTIME_FAILURE;
+    }
+    return params.result;
+}
+
+XrResult WINAPI xrGetD3D12GraphicsRequirementsKHR(XrInstance instance,
+                                                  XrSystemId systemId,
+                                                  XrGraphicsRequirementsD3D12KHR *graphicsRequirements)
+{
+    struct wine_XrInstance *wine_instance;
+    struct xrGetD3D12GraphicsRequirementsKHR_params params = {
+        .instance = instance, .systemId = systemId,
+        .graphicsRequirements = graphicsRequirements,
+    };
+    NTSTATUS status;
+
+    if (!graphicsRequirements)
+        return XR_ERROR_VALIDATION_FAILURE;
+
+    wine_instance = wine_instance_from_handle(instance);
+    status = UNIX_CALL(xrGetD3D12GraphicsRequirementsKHR, &params);
+    if (status)
+    {
+        WINE_ERR("xrGetD3D12GraphicsRequirementsKHR unix call failed: 0x%x\n",
+                 (unsigned)status);
+        return XR_ERROR_RUNTIME_FAILURE;
+    }
+    if (params.result == XR_SUCCESS)
+    {
+        d3d12_fix_adapter_luid(&graphicsRequirements->adapterLuid);
+        EnterCriticalSection(&primary_session_lock);
+        wine_instance->d3d12_requirements_queried_for = systemId;
+        LeaveCriticalSection(&primary_session_lock);
     }
     return params.result;
 }

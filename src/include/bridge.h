@@ -12,6 +12,12 @@ typedef struct ID3D11DeviceContext ID3D11DeviceContext;
 typedef struct ID3D11Texture2D ID3D11Texture2D;
 #endif
 typedef struct IDXGIKeyedMutex IDXGIKeyedMutex;
+#ifndef __d3d12_h__
+typedef struct ID3D12Device ID3D12Device;
+typedef struct ID3D12CommandQueue ID3D12CommandQueue;
+typedef struct ID3D12Resource ID3D12Resource;
+typedef struct ID3D12Fence ID3D12Fence;
+#endif
 #ifndef __d3dcommon_h__
 typedef int D3D_FEATURE_LEVEL;
 #endif
@@ -121,6 +127,8 @@ struct wine_XrInstance
      * flips Monado's gotten_requirements, so the bridge must track it before
      * that call. Read and written under primary_session_lock */
     XrSystemId d3d11_requirements_queried_for;
+    /* Same, for xrGetD3D12GraphicsRequirementsKHR */
+    XrSystemId d3d12_requirements_queried_for;
 
     XrVersion api_version;
     uint64_t enabled_extensions[(XR_BRIDGE_EXTENSION_COUNT + 63) / 64];
@@ -164,6 +172,18 @@ struct wine_XrSession
     void *dms_query;
     void *dms_fence;
     void *dms_ctx4;
+
+    /* D3D12 (XR_KHR_D3D12_enable), D3DMetal only. The app's device and
+     * queue (+1 each). Swapchain images are committed resources whose
+     * MTLTexture D3DMetal was handed from the runtime (dmsubst). d3d12_fence
+     * is an ID3D12Fence backed by the MTLSharedEvent in mtl_shared_event;
+     * xrReleaseSwapchainImage signals it on d3d12_queue */
+    ID3D12Device       *d3d12_device;
+    ID3D12CommandQueue *d3d12_queue;
+    ID3D12Fence        *d3d12_fence;
+    ID3D12Fence        *d3d12_cpu_fence; /* plain fence for the CPU fallback wait */
+    uint64_t            d3d12_cpu_fence_value;
+    void               *d3d12_cpu_event; /* HANDLE */
 
     struct list swapchain_list;
 

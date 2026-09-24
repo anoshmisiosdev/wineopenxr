@@ -25,6 +25,21 @@
  *    the calling thread; substituting an MTLSharedEvent there gives a working
  *    GPU-side release fence (Context4::Signal lands on D3DMetal's queue).
  *
+ * D3D12 on the same D3DMetal (test/d3d12_d3dmetal_subst_test.cpp):
+ *  - CreateCommittedResource (RT 2D/2D-array, typeless/sRGB/16F/10:10:10:2,
+ *    MSAA, UAV, depth, CREATE_NOT_ZEROED or not) = one
+ *    -[MTLDevice newTextureWithDescriptor:], synchronously on the calling
+ *    thread, Shared storage + PixelFormatView, like D3D11. CreatePlacedResource
+ *    goes through -[MTLHeap newTextureWithDescriptor:offset:] on a Placement
+ *    heap from CreateHeap (not needed: the bridge only creates committed ones).
+ *  - CreateFence = one -newEvent on the calling thread (substituted with an
+ *    MTLSharedEvent); ID3D12CommandQueue::Signal signals it on D3DMetal's
+ *    queue.
+ *  - D3D12 submits on CLASSIC queues by default. With D3DM_MTL4=1 it commits
+ *    on MTL4 queues instead; every committed texture (ours included) is added
+ *    to the residency set attached to those queues, so substituted images are
+ *    resident either way. No -heap queries on substituted textures.
+ *
  * Plain C, no Metal/D3D types: shared by the PE side (MinGW) and the unix side
  * (ObjC). Keep the layout identical on both (all fields fixed-width). */
 

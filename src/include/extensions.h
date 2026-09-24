@@ -7,6 +7,7 @@ static const char *const xr_bridge_extensions[] =
     "XR_EXT_hand_tracking",
     "XR_FB_display_refresh_rate",
     "XR_KHR_D3D11_enable",
+    "XR_KHR_D3D12_enable",
     "XR_KHR_composition_layer_cube",
     "XR_KHR_composition_layer_cylinder",
     "XR_KHR_composition_layer_depth",
