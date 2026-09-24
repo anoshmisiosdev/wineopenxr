@@ -29,6 +29,9 @@
 #include <string.h>
 #include <mach-o/dyld.h>
 #include <dlfcn.h>
+#include <stdarg.h>
+#include <time.h>
+#include <unistd.h>
 
 #include "wine/debug_slim.h"
 #include "dmsubst.h"
@@ -57,10 +60,48 @@ static uint64_t tid(void)
     return t;
 }
 
+/* ---- the bridge log file -------------------------------------------------
+ * Always on, low volume: session/swapchain setup, substitution results,
+ * errors, a backend summary. Independent of WINEDEBUG and of where the game's
+ * stderr goes (usually nowhere when launched from Steam). Path:
+ * $OXR_BRIDGE_LOG, default /tmp/wineopenxr.log; OXR_BRIDGE_LOG=0 disables */
+
+static pthread_mutex_t g_log_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void oxr_bridge_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void oxr_bridge_log(const char *fmt, ...)
+{
+    const char *path = getenv("OXR_BRIDGE_LOG");
+    char line[1024], stamp[32];
+    struct timespec ts;
+    struct tm tm;
+    va_list ap;
+    FILE *f;
+
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    clock_gettime(CLOCK_REALTIME, &ts);
+    localtime_r(&ts.tv_sec, &tm);
+    strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &tm);
+
+    fprintf(stderr, "[wineopenxr] %s\n", line);
+    if (path && !strcmp(path, "0"))
+        return;
+    pthread_mutex_lock(&g_log_lock);
+    f = fopen(path && *path ? path : "/tmp/wineopenxr.log", "a");
+    if (f)
+    {
+        fprintf(f, "%s.%03ld [pid %d] %s\n", stamp, ts.tv_nsec / 1000000, (int)getpid(), line);
+        fclose(f);
+    }
+    pthread_mutex_unlock(&g_log_lock);
+}
+
 #define DLOG(lvl, fmt, ...) do { if (trace_level() >= (lvl)) \
     fprintf(stderr, "[dmsubst tid=%llu] " fmt "\n", (unsigned long long)tid(), ##__VA_ARGS__); } while (0)
 #define DERR(fmt, ...) \
-    fprintf(stderr, "[dmsubst tid=%llu] ERROR: " fmt "\n", (unsigned long long)tid(), ##__VA_ARGS__)
+    oxr_bridge_log("dmsubst ERROR: " fmt, ##__VA_ARGS__)
 
 static const char *desc_str(MTLTextureDescriptor *d, char *buf, size_t n)
 {
@@ -1281,6 +1322,10 @@ static int readback(struct dmsubst_params *p)
         case MTLPixelFormatRGBA32Float:
             memcpy(p->rgba, b, 16);
             break;
+        case MTLPixelFormatDepth32Float:
+            memcpy(&p->rgba[0], b, 4);
+            p->rgba[1] = p->rgba[2] = p->rgba[3] = 0.0f;
+            break;
         default:
             for (i = 0; i < 4; i++) p->rgba[i] = -1.0f;
             break;
@@ -1343,7 +1388,7 @@ static int dump_ppm(struct dmsubst_params *p)
                 sum[0] += rgb[0]; sum[1] += rgb[1]; sum[2] += rgb[2];
             }
         fclose(f);
-        DLOG(0, "dumped %s (%lux%lu slice %u fmt %lu), mean rgb %.1f %.1f %.1f", p->where, (unsigned long)w,
+        oxr_bridge_log("dumped %s (%lux%lu slice %u fmt %lu), mean rgb %.1f %.1f %.1f", p->where, (unsigned long)w,
              (unsigned long)h, p->slice, (unsigned long)tex.pixelFormat, sum[0] / (w * h), sum[1] / (w * h),
              sum[2] / (w * h));
         [q release];
@@ -1377,10 +1422,54 @@ int dmsubst_process_has_d3dmetal(void)
     return !!(detect() & DMSUBST_DETECT_D3DMETAL);
 }
 
+/* Debug knobs for games launched from Steam: a running Steam client does not
+ * pick up new cxbottle.conf [EnvironmentVariables] until it is restarted, and
+ * Windows Steam's launch options cannot set variables. So KEY=VALUE lines in
+ * ~/Library/Application Support/OXRSys/wineopenxr.env (or $OXR_BRIDGE_ENV_FILE)
+ * are applied at load, without overriding anything already set. The PE half
+ * reads them through DMSUBST_OP_GETENV (its CRT has its own environment) */
+static void load_env_file(void)
+{
+    const char *file = getenv("OXR_BRIDGE_ENV_FILE"), *home = getenv("HOME");
+    char path[1024], line[512];
+    FILE *f;
+    int n = 0;
+
+    if (file && *file)
+        snprintf(path, sizeof(path), "%s", file);
+    else if (home)
+        snprintf(path, sizeof(path), "%s/Library/Application Support/OXRSys/wineopenxr.env", home);
+    else
+        return;
+    if (!(f = fopen(path, "r")))
+        return;
+    while (fgets(line, sizeof(line), f))
+    {
+        char *k = line, *eq, *end;
+        while (*k == ' ' || *k == '\t') k++;
+        if (*k == '#' || !(eq = strchr(k, '=')))
+            continue;
+        *eq = 0;
+        for (end = eq + 1 + strlen(eq + 1); end > eq + 1 && (end[-1] == '\n' || end[-1] == '\r' || end[-1] == ' '); )
+            *--end = 0;
+        for (end = eq; end > k && (end[-1] == ' ' || end[-1] == '\t'); )
+            *--end = 0;
+        if (*k && !getenv(k))
+        {
+            setenv(k, eq + 1, 0);
+            n++;
+        }
+    }
+    fclose(f);
+    if (n)
+        oxr_bridge_log("applied %d setting(s) from %s", n, path);
+}
+
 /* Runs when Wine dlopens this .so, i.e. when wineopenxr.dll is loaded (usually
  * the game's first OpenXR call, before it creates its D3D11 device). */
 __attribute__((constructor)) static void dmsubst_early_init(void)
 {
+    load_env_file();
     const char *e = getenv("OXR_DMSUBST_EARLY");
     if (e && atoi(e))
         install();
@@ -1450,6 +1539,21 @@ NTSTATUS wine_dmsubst(void *args)
     case DMSUBST_OP_EVENT_VALUE:
         p->event_value = p->mtl_texture ? [(id<MTLSharedEvent>)(void *)(uintptr_t)p->mtl_texture signaledValue] : 0;
         break;
+    case DMSUBST_OP_LOG:
+        if (p->text)
+            oxr_bridge_log("%s", (const char *)(uintptr_t)p->text);
+        break;
+    case DMSUBST_OP_GETENV:
+    {
+        const char *v;
+        p->where[sizeof(p->where) - 1] = 0;
+        v = getenv(p->where);
+        if (!v)
+            p->status = -1;
+        else
+            snprintf(p->where, sizeof(p->where), "%s", v);
+        break;
+    }
     case DMSUBST_OP_STATS:
         p->n_textures = atomic_load(&g_n_textures);
         p->n_heaps = atomic_load(&g_n_heaps);

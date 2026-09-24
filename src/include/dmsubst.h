@@ -61,6 +61,9 @@ enum dmsubst_op
     DMSUBST_OP_STATS,        /* out: global counters */
     DMSUBST_OP_EVENT_VALUE,  /* mtl_texture = id<MTLSharedEvent>; out: event_value */
     DMSUBST_OP_DUMP,         /* write slice of mtl_texture as a PPM to the path in where[] (GPU-waits on event like READBACK) */
+    DMSUBST_OP_LOG,          /* append the NUL-terminated string at `text` to the bridge log (and stderr) */
+    DMSUBST_OP_GETENV,       /* in: variable name in where[]; out: value in where[], status -1 if unset.
+                              * Sees wineopenxr.env (see dmsubst.m), which the PE CRT environment does not */
 };
 
 #define DMSUBST_ARM_PROBE       0x1  /* count/log creations, do not substitute */
@@ -107,6 +110,8 @@ struct dmsubst_params
     /* STATS */
     uint64_t n_textures, n_heaps, n_resset_add, n_resset_add_subst, n_heap_queries_subst;
     uint64_t n_mtl4_queues, n_classic_queues, n_mtl4_commits, n_classic_cbs;
+
+    uint64_t text;               /* LOG: const char * (same address space) */
 };
 
 #endif /* __WINE_OPENXR_DMSUBST_H */

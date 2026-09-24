@@ -216,6 +216,8 @@ struct wine_XrSwapchain
     uint32_t image_count;
     /* PROTOTYPE: the runtime's id<MTLTexture> per image (borrowed) */
     uint64_t *mtl_textures;
+    /* releases of this swapchain, for OXR_DMSUBST_DUMP_AT */
+    long release_count;
 };
 
 static inline struct wine_XrInstance *wine_instance_from_handle(XrInstance handle)
